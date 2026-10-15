@@ -1,0 +1,9 @@
+# Paths that need jmarrero's review whatever the merge policy in
+# .github/agentic-job/merge.toml (agentic-job's docs/review.md#merge-policy),
+# once the ruleset on main requires review from code owners: the workflows,
+# bounds, profiles and poll scripts, the review's own bounds and task, and
+# the Justfile, whose recipes run with the bot's token. Nothing parses this
+# comment.
+/.github/ @jmarrero
+/workflow/ @jmarrero
+/Justfile @jmarrero
