@@ -122,11 +122,12 @@ test('workflow previews only: no apply, no state, no successor', () => {
   assert.doesNotMatch(yml, /node \.github\/poll\/poll.cjs|\n  agent-board:/);
   // Read-only by construction: no step has the bot's write token.
   assert.equal((code.match(/GH_TOKEN: \$\{\{ secrets\.JMARRERO_BOT_READ_TOKEN \}\}/g) ?? []).length, 4);
-  assert.equal((code.match(/secrets\./g) ?? []).length, 4);
+  assert.equal((code.match(/secrets\.JMARRERO_BOT_READ_TOKEN\b/g) ?? []).length, 5);
+  assert.equal((code.match(/secrets\./g) ?? []).length, 5);
   assert.match(job, /DISPATCH_TOKEN: \$\{\{ github.token \}\}/);
   assert.equal((yml.match(/run: just build-agent-board/g) ?? []).length, 2);
   assert.match(job, /runs-on: ubuntu-26.04/);
-  assert.match(job, /if: \$\{\{ github.ref == format\('refs\/heads\/\{0\}', github.event.repository.default_branch\) \}\}/);
+  assert.match(yml, /\n  token:\n    if: \$\{\{ github.ref == format\('refs\/heads\/\{0\}', github.event.repository.default_branch\) \}\}\n/);
   assert.match(job, /persist-credentials: false/);
   for (const step of ['Epic census', 'Coordinator']) assert.ok(yml.includes(`- name: ${step}`));
   assert.ok(yml.includes('run: node .github/poll/schedule.cjs 2>&1'));
@@ -229,6 +230,51 @@ test('dispatch.yml gives an agent without skills the full implement profile', ()
   assert.equal(expected('fix', false), expected('fix', true));
   assert.equal(run('nonesuch', 'fix'), null);
   assert.equal(run('', 'implement-full', 'opencode'), null);
+});
+
+// Until jmarrero creates the read token, every scheduled pass would fail:
+// the token job says whether it exists, and both acting jobs need it.
+test('without the read token both jobs are skipped, not failed', t => {
+  const yml = fs.readFileSync(path.join(__dirname, '../workflows/poll.yml'), 'utf8');
+  for (const name of ['board', 'poll']) {
+    const job = yml.split(`\n  ${name}:\n`)[1].split(/\n {2}[a-z-]+:\n/)[0];
+    assert.match(job, /^(?: {4}#.*\n)*? {4}needs: token\n {4}if: \$\{\{ needs\.token\.outputs\.ready == 'true' \}\}\n/m, name);
+  }
+  const token = yml.split('\n  token:\n')[1].split(/\n\n {2}#/)[0];
+  assert.match(token, /\n {4}permissions: \{\}\n/);
+  assert.match(token, /\n {6}ready: \$\{\{ steps\.token\.outputs\.ready \}\}\n/);
+  // The step's own script, run as Actions would, with and without a token.
+  const script = /\n {8}run: \|\n((?: {10}.*\n)+)/.exec(`${token}\n`)[1].replace(/^ {10}/gm, '');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'poll-token-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  for (const [value, ready] of [['', 'false'], ['ghp_example', 'true']]) {
+    const output = path.join(dir, `out-${ready}`);
+    fs.writeFileSync(output, '');
+    const stdout = execFileSync('bash', ['-eo', 'pipefail', '-c', script], {
+      env: { ...process.env, READ_TOKEN: value, GITHUB_OUTPUT: output }, encoding: 'utf8',
+    });
+    assert.equal(fs.readFileSync(output, 'utf8'), `ready=${ready}\n`);
+    assert.equal(/::notice::/.test(stdout), ready === 'false');
+    assert.doesNotMatch(stdout, /ghp_example/);
+  }
+});
+
+// Only implement, the kind that pushes to the bot's fork and opens a pull
+// request, enters agent-apply, where the PAT is; the rest use the job token.
+test('trial.yml enters agent-apply only for implement', () => {
+  const trial = fs.readFileSync(path.join(__dirname, '../workflows/trial.yml'), 'utf8');
+  const code = trial.split('\n').filter(line => !line.trim().startsWith('#')).join('\n');
+  const lines = [...code.matchAll(/^ {6}apply-environment: \$\{\{ (.+) \}\}$/gm)];
+  assert.equal(lines.length, 1);
+  assert.equal((code.match(/agent-apply/g) ?? []).length, 1);
+  assert.doesNotMatch(code, /\n {4}environment:/);
+  // The expression is valid JavaScript as written.
+  const environment = new Function('inputs', `return ${lines[0][1]};`);
+  const kinds = /options: \[([^\]]+)\]/.exec(trial)[1].split(',').map(k => k.trim());
+  assert.deepEqual(kinds, ['implement', 'triage', 'research', 'review']);
+  for (const kind of kinds) assert.equal(environment({ kind }), kind === 'implement' ? 'agent-apply' : '', kind);
+  assert.match(code, /\n {6}SAFE_OUTPUTS_PAT: \$\{\{ secrets\.SAFE_OUTPUTS_PAT \}\}\n/);
+  assert.equal((code.match(/secrets\./g) ?? []).length, 1);
 });
 
 // Every action and reusable workflow is pinned by commit, our own
