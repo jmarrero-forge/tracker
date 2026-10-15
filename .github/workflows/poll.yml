@@ -1,0 +1,127 @@
+# agent-board's pull request poll, the board scheduler and the epic
+# coordinator, adapted from cgwalters-forge/tracker's poll.yml, in preview
+# only. jmarrero-bot's current controller (homegit's bot-poll and the
+# coordinator session) still acts on the same pull requests and board, and
+# only one controller may write at a time, so here nothing writes: the poll
+# always runs `--dry-run`, the scheduler and coordinator never get
+# `--apply`, and no step can start a run. Each pass prints what it would
+# have done in the run's summary, to compare with what bot-poll did. Letting
+# any of them act is a pull request here, made together with turning off
+# the matching part of bot-poll. Their token is read-only too:
+# JMARRERO_BOT_READ_TOKEN, jmarrero-bot's classic token with only the
+# read:project scope, which reads the organization's board and, like any
+# token, public repositories, and can write nothing.
+name: poll
+run-name: poll (preview)
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+permissions: {}
+# One pass at a time; a pass that is due while one runs waits for it.
+concurrency:
+  group: poll
+  cancel-in-progress: false
+
+jobs:
+  # The board scheduler, the epic census and the epic coordinator
+  # (.github/poll/schedule.cjs, epics.cjs and coordinator.cjs), previewed.
+  board:
+    if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    runs-on: ubuntu-26.04
+    # The build, scheduler, census and coordinator each have their own bound;
+    # leave room for all four and just setup inside the job's limit.
+    timeout-minutes: 40
+    # Reads only: the job token lists dispatch.yml's runs, and starts none.
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+        with:
+          just-version: 1.58.0
+      # Built afresh at the commit agent-board.json pins, as in the poll
+      # job: the binary is given the bot's token, so it comes from no cache
+      # and from no moving branch.
+      - name: Build agent-board at the pinned commit
+        timeout-minutes: 10
+        run: just build-agent-board
+      - name: One pass
+        timeout-minutes: 15
+        env:
+          # The bot's read-only token reads the organization's board; the
+          # job token reads dispatch.yml's runs.
+          GH_TOKEN: ${{ secrets.JMARRERO_BOT_READ_TOKEN }}
+          DISPATCH_TOKEN: ${{ github.token }}
+          AGENT_BOARD: ${{ runner.temp }}/agent-board/bin/agent-board
+        shell: bash
+        # stderr too, so that the summary says why a pass failed.
+        run: node .github/poll/schedule.cjs 2>&1 | tee "$RUNNER_TEMP/pass.log"
+      - name: Summary
+        if: ${{ !cancelled() }}
+        run: |
+          {
+            echo '### Board scheduler (preview)'
+            echo '<pre>'
+            sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g' "$RUNNER_TEMP/pass.log" 2>/dev/null || echo 'No pass ran'
+            echo '</pre>'
+          } >> "$GITHUB_STEP_SUMMARY"
+      # The epic census: reads the live epics and prints their state; it
+      # writes nothing. Its failure is not the pass's: it is reported in its
+      # section, or, where Node could not load it, in the step's log.
+      - name: Epic census
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ secrets.JMARRERO_BOT_READ_TOKEN }}
+        shell: bash
+        run: node .github/poll/epics.cjs | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Coordinator
+        if: ${{ !cancelled() }}
+        # Its summary retains errors without turning a successful scheduling
+        # pass into a failed job.
+        continue-on-error: true
+        timeout-minutes: 8
+        env:
+          GH_TOKEN: ${{ secrets.JMARRERO_BOT_READ_TOKEN }}
+          DISPATCH_TOKEN: ${{ github.token }}
+          AGENT_BOARD: ${{ runner.temp }}/agent-board/bin/agent-board
+        shell: bash
+        run: just coordinator
+
+  # agent-board's poll of the bot's pull requests in the followed
+  # repositories, as a dry run: no state is kept between passes and no next
+  # pass is started.
+  poll:
+    if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    runs-on: ubuntu-26.04
+    # Build (10), pass (6), plus checkout and setup.
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+        with:
+          just-version: 1.58.0
+      - name: Build agent-board at the pinned commit
+        timeout-minutes: 10
+        run: just build-agent-board
+      - name: One pass
+        timeout-minutes: 6
+        env:
+          GH_TOKEN: ${{ secrets.JMARRERO_BOT_READ_TOKEN }}
+          DISPATCH_TOKEN: ${{ github.token }}
+          AGENT_BOARD: ${{ runner.temp }}/agent-board/bin/agent-board
+          POLL_STATE: ${{ runner.temp }}/poll-state.json
+        shell: bash
+        run: just poll --dry-run
