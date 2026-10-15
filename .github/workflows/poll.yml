@@ -26,10 +26,34 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Whether the read token exists yet: a job cannot test a secret in its
+  # `if:`, so this one says it as an output, and without the token the two
+  # below are skipped with a notice rather than failing every pass.
+  token:
+    if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions: {}
+    outputs:
+      ready: ${{ steps.token.outputs.ready }}
+    steps:
+      - name: Check for the read token
+        id: token
+        env:
+          READ_TOKEN: ${{ secrets.JMARRERO_BOT_READ_TOKEN }}
+        run: |
+          if [[ -n "$READ_TOKEN" ]]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::JMARRERO_BOT_READ_TOKEN is not set; skipping this pass (README, Setup)"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
   # The board scheduler, the epic census and the epic coordinator
   # (.github/poll/schedule.cjs, epics.cjs and coordinator.cjs), previewed.
   board:
-    if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    needs: token
+    if: ${{ needs.token.outputs.ready == 'true' }}
     runs-on: ubuntu-26.04
     # The build, scheduler, census and coordinator each have their own bound;
     # leave room for all four and just setup inside the job's limit.
@@ -99,7 +123,8 @@ jobs:
   # repositories, as a dry run: no state is kept between passes and no next
   # pass is started.
   poll:
-    if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    needs: token
+    if: ${{ needs.token.outputs.ready == 'true' }}
     runs-on: ubuntu-26.04
     # Build (10), pass (6), plus checkout and setup.
     timeout-minutes: 25

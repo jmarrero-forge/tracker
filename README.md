@@ -40,15 +40,15 @@ to other repositories' pull requests yet.
 
 Every action and reusable workflow is pinned by commit, and agent-board is
 built at the commit [agent-board.json](.github/poll/agent-board.json) pins.
-The wrappers' pin in `dispatch.yml` and `review.yml` is a placeholder until
-jmarrero-forge/actions#1 merges, then the main commit the broker's policy
-names.
+The wrappers' pin in `dispatch.yml` and `review.yml` is a commit on
+jmarrero-forge/actions main, the one the broker's policy names.
 
 The bot's write token reaches one job: apply's, which runs in the
 `agent-apply` environment, the only place it is stored. There it pushes a
 run's branch to jmarrero-bot's fork of the target (jmarrero-bot/NAME,
 which apply creates if missing, with its Actions turned off) and opens the
-pull request. Status comments write with the job token. The poll,
+pull request. Status comments write with the job token, so items in
+other repositories get none. The poll,
 scheduler and coordinator read with a separate token that can write
 nothing.
 
@@ -68,7 +68,8 @@ Done by jmarrero, since the bot's token cannot:
    `SAFE_OUTPUTS_PAT`: a classic token of jmarrero-bot with the `repo` and
    `workflow` scopes. Not an organization or repository secret: only the
    apply job enters the environment.
-2. The organization secret `JMARRERO_BOT_READ_TOKEN`: a classic token of
+2. The organization secret `JMARRERO_BOT_READ_TOKEN`, available to
+   selected repositories (this one only): a classic token of
    jmarrero-bot with only the `read:project` scope, for the poll's board
    reads (every followed repository is public, which needs no scope). A
    fine-grained token also works if the organization allows them:

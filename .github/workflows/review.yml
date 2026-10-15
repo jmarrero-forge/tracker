@@ -32,9 +32,8 @@ jobs:
       vars.AGENT_REVIEW != '' && (github.event_name == 'pull_request_target' ||
       (github.event.issue.pull_request && startsWith(github.event.comment.body, '/review')))
     # Base-owned policy; the head is fetched only as data inside the sandbox.
-    # PLACEHOLDER pin: the head of jmarrero-forge/actions#1, not yet on its
-    # main. Re-pin to the main commit once that pull request merges, the one
-    # the broker's run-token policy names.
+    # 2a2825f is on jmarrero-forge/actions main (merged in #1), the commit
+    # the broker's run-token policy names; move it together with that.
     uses: jmarrero-forge/actions/.github/workflows/jmarrero-review.yml@2a2825fa768dc005d067d31484b0899d184732c6
     permissions:
       contents: read
