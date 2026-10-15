@@ -1,0 +1,15 @@
+# Bounds for trial.yml: the scripted agent on this repository only, one
+# output of each kind, and no push to an existing pull request's branch.
+hosts = ["github.com"]
+repos = ["jmarrero-forge/tracker"]
+bases = ["main"]
+max_outputs = 3
+max_patch_bytes = 1048576
+max_patch_files = 50
+
+[outputs]
+create_pull_request = { max = 1 }
+add_comment = { max = 1 }
+noop = { max = 1 }
+missing_tool = { max = 1 }
+missing_data = { max = 1 }

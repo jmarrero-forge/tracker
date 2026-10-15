@@ -1,0 +1,43 @@
+{
+  "source": "https://github.com/cgwalters-forge/agent-board",
+  "branch": "main",
+  "rev": "07de38a6bc6c96e466cd3736a0e2cf5ac2ae02b4",
+  "operator": "jmarrero",
+  "bot": "jmarrero-bot",
+  "generatedBy": "https://github.com/jmarrero-bot#llms",
+  "mergeAuthors": [],
+  "dispatchRepo": "jmarrero-forge/tracker",
+  "dispatchWorkflow": "dispatch.yml",
+  "reviewWorkflow": "review.yml",
+  "follow": [
+    "jmarrero-forge/tracker",
+    "jmarrero-forge/actions",
+    "jmarrero-forge/review",
+    "jmarrero-forge/homegit"
+  ],
+  "fixPools": ["claude"],
+  "toilFixPool": "claude",
+  "kindPools": {},
+  "epics": {
+    "repository": "jmarrero-forge/tracker"
+  },
+  "coordinator": {
+    "planPool": "claude",
+    "statusPool": "claude",
+    "statusIssue": 1,
+    "statusHourUTC": 11
+  },
+  "schedule": {
+    "owner": "jmarrero-forge",
+    "project": 1,
+    "wip": 2,
+    "priorityField": "Priority",
+    "triagePerPass": 1,
+    "repositories": [
+      "jmarrero-forge/tracker",
+      "jmarrero-forge/actions",
+      "jmarrero-forge/review",
+      "jmarrero-forge/homegit"
+    ]
+  }
+}

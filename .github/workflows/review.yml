@@ -1,0 +1,45 @@
+# An agent's review of every pull request here, through jmarrero-forge/
+# actions' jmarrero-review.yml pinned by commit (agentic-job's
+# docs/review.md, "Another repository"): agentic-job's own review.yml joins
+# cgwalters' tailnet, which has no entry for this organization. The
+# wrapper reads its bounds (workflow/review.toml,
+# workflow/review-command.toml) and its task (workflow/review.md) from this
+# repository's base branch, the merge policy from
+# .github/agentic-job/merge.toml, and the runner's configuration from
+# agentic-job's own hosted.toml unless the variable AGENT_CONFIG names a
+# file here. With the variable AGENT_REAL_REVIEWS it also submits the
+# verdict as a review by github-actions[bot]. That approval does not merge
+# a change to .github/, workflow/ or the Justfile by itself: CODEOWNERS
+# names jmarrero for those, and the ruleset on main requires a code
+# owner's review.
+# Off until the repository variable AGENT_REVIEW names the reviewing
+# agent: the wrapper has no fallback agent or broker, and AGENT, which
+# turns on dispatched runs, leaves reviews off, since the broker admits
+# only workflow_dispatch runs today.
+name: review
+on:
+  # Runs this file from the base branch. No job here checks out the pull
+  # request: the agent fetches the head as data inside its sandbox, with
+  # no credential, and no secret is passed to the called workflow.
+  pull_request_target: # zizmor: ignore[dangerous-triggers]
+    types: [opened, synchronize, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
+permissions: {}
+jobs:
+  review:
+    if: >-
+      vars.AGENT_REVIEW != '' && (github.event_name == 'pull_request_target' ||
+      (github.event.issue.pull_request && startsWith(github.event.comment.body, '/review')))
+    # Base-owned policy; the head is fetched only as data inside the sandbox.
+    # PLACEHOLDER pin: the head of jmarrero-forge/actions#1, not yet on its
+    # main. Re-pin to the main commit once that pull request merges, the one
+    # the broker's run-token policy names.
+    uses: jmarrero-forge/actions/.github/workflows/jmarrero-review.yml@2a2825fa768dc005d067d31484b0899d184732c6
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: write
+      actions: read
+      id-token: write
+      statuses: write

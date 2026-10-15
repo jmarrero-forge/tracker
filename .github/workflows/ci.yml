@@ -1,0 +1,86 @@
+# Checks of this repository's own automation, so a pull request that edits
+# `.github/` is tested before it merges. The one job named ci is what the
+# main branch ruleset requires: a new check is added to its `needs`, with
+# no change to the ruleset.
+name: ci
+
+on:
+  pull_request:
+  merge_group:
+    types: [checks_requested]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # The tests of the poll scripts, through the Justfile.
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The hosted image's Node; the scripts have no dependencies to install.
+      # A pinned just: Ubuntu's apt carries an old one (1.21 on 24.04).
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+        with:
+          just-version: 1.58.0
+      - run: just test
+
+  # actionlint, zizmor and the runner-label policy shared by the forge
+  # repositories, at the versions its `just check` recipe pins in
+  # jmarrero-forge/actions at the commit named here; `just lint` runs the
+  # same recipe locally.
+  lint:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jmarrero-forge/actions/lint@23ed6a7b8e75b1811e3f1e2997ff201f50657420
+
+  # The bounds, runner configuration and pools that dispatch.yml reads from
+  # the default branch, and review.yml's bounds: a file that does not parse
+  # fails every run after the merge.
+  config:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Parse the JSON and TOML files of .github/agentic-job and workflow
+        run: |
+          python3 - .github/agentic-job/*.json .github/agentic-job/*.toml workflow/*.toml <<'PY'
+          import json, sys, tomllib
+
+          failed = False
+          for path in sys.argv[1:]:
+              try:
+                  with open(path, "rb") as f:
+                      (json if path.endswith(".json") else tomllib).load(f)
+              except (OSError, ValueError) as e:
+                  failed = True
+                  print(f"::error file={path}::{e}")
+              else:
+                  print(f"ok {path}")
+          sys.exit(failed)
+          PY
+
+  # Require only ci in the ruleset, on both PR and merge-group commits.
+  ci:
+    if: ${{ always() }}
+    needs: [test, lint, config]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: jq -e 'all(.[]; .result == "success")' <<< "$RESULTS"

@@ -1,0 +1,30 @@
+# Bounds for dispatch.yml: the repositories a dispatched run may target.
+# Exact names, no globs; add a repository here before dispatching to it.
+# The bot's own repositories in jmarrero-forge, and the forge's forks of
+# the upstreams it works on; a run's pull request comes from jmarrero-bot's
+# fork of the target.
+hosts = ["github.com"]
+repos = ["jmarrero-forge/tracker", "jmarrero-forge/actions", "jmarrero-forge/review", "jmarrero-forge/homegit", "jmarrero-forge/bootc", "jmarrero-forge/ostree", "jmarrero-forge/rpm-ostree"]
+bases = ["main"]
+max_outputs = 3
+max_patch_bytes = 1048576
+max_patch_files = 50
+
+[outputs]
+create_pull_request = { max = 1 }
+add_comment = { max = 1 }
+noop = { max = 1 }
+missing_tool = { max = 1 }
+missing_data = { max = 1 }
+
+# Pull requests (implement) may edit `.github/` and AGENTS.md only in the
+# repositories listed here, and none is yet. The prerequisites are in
+# agentic-job's docs/safe-outputs.md: a repository is listed only once a
+# ruleset on its main requires an approving review with stale approvals
+# dismissed on push, and code owner review for `.github/`, since that
+# review is the only gate on a run's `.github/` edit there. Exact names,
+# no globs; fix.toml keeps the same list.
+[unprotected_files]
+repos = []
+files = []
+dot_folders = []

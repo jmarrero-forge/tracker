@@ -1,0 +1,8 @@
+# The repository owner's merge policy, read by the review wrapper's policy
+# job from the default branch and stated to the reviewer as fact
+# (agentic-job's docs/review.md#merge-policy). "agent": an approving review
+# by the review job merges by default. The paths .github/CODEOWNERS names
+# (all of .github/, workflow/ and the Justfile, this file and CODEOWNERS
+# included) still wait for jmarrero where the ruleset requires code owner
+# review. Check refuses agent patches to this file.
+merge = "agent"
