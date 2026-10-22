@@ -35,8 +35,10 @@ permissions: {}
 # moving branch, and health/trigger and execute agree within a run. At this
 # commit every write but the log is capped at zero unless config.json sets
 # a cap. Move it only with a review of that revision's `supervise` code.
+# Ahead of upstream's pin (bfeb126) to include agent-board#230, which
+# takes the playbook's operator and the comment footer from agent-board.json.
 env:
-  AGENT_BOARD_REV: bfeb126054abf5b024e71ca42ffd401247782989
+  AGENT_BOARD_REV: f52ded31a4d7e59e053abc4d0ec953e80e6719b9
 # Keep whole runs serialized: trigger considers the previous workflow active
 # through execute, even after its agent job ends, so a job-only group would
 # discard manual prompts in that window. GitHub keeps one pending run per
@@ -54,8 +56,8 @@ concurrency:
   group: >-
     ${{ (!(github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
     (github.event_name != 'issue_comment' ||
-    (github.event.comment.user.login == (vars.OPERATOR || 'cgwalters') &&
-    github.event.issue.number == fromJSON(vars.SUPERVISOR_REQUESTS_ISSUE || '656') && github.event.issue.locked == true &&
+    (github.event.comment.user.login == (vars.OPERATOR || 'jmarrero') &&
+    github.event.issue.number == fromJSON(vars.SUPERVISOR_REQUESTS_ISSUE || '9001') && github.event.issue.locked == true &&
     !github.event.issue.pull_request))) && format('supervisor-ignored-{0}', github.run_id)) ||
     ((github.event.schedule == '*/15 * * * *' || github.event_name == 'workflow_run' ||
     (github.event_name == 'workflow_dispatch' && inputs.prompt == '')) && 'supervisor-health') ||
@@ -74,8 +76,8 @@ jobs:
     if: >-
       github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
       (github.event_name != 'issue_comment' ||
-       (github.event.comment.user.login == (vars.OPERATOR || 'cgwalters') &&
-        github.event.issue.number == fromJSON(vars.SUPERVISOR_REQUESTS_ISSUE || '656') && github.event.issue.locked == true &&
+       (github.event.comment.user.login == (vars.OPERATOR || 'jmarrero') &&
+        github.event.issue.number == fromJSON(vars.SUPERVISOR_REQUESTS_ISSUE || '9001') && github.event.issue.locked == true &&
         !github.event.issue.pull_request))
     runs-on: ubuntu-26.04
     # Build (10), previous report (2), pacing (1), collection (8), plus setup/upload.
@@ -102,6 +104,18 @@ jobs:
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
         with:
           just-version: 1.58.0
+      # Without the read token (README, Setup) the pass is skipped with a
+      # notice rather than failing every fifteen minutes.
+      - name: Check for the read token
+        id: token
+        env:
+          READ_TOKEN: ${{ secrets.JMARRERO_BOT_READ_TOKEN }}
+        run: |
+          if [[ -n "$READ_TOKEN" ]]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::JMARRERO_BOT_READ_TOKEN is not set; skipping this pass (README, Setup)"
+          fi
       # read=true only when this run's report was downloaded or none exists,
       # never when the lookup failed, so the pacing can tell the two apart
       # (#814). Listing the artifact by name is one request, where listing
@@ -137,6 +151,7 @@ jobs:
       # Before the build, so a run the poll started too soon ends in seconds.
       - name: Whether a pass is due
         id: due
+        if: ${{ steps.token.outputs.ready == 'true' }}
         timeout-minutes: 1
         env:
           EVENT: ${{ github.event_name }}
@@ -153,7 +168,8 @@ jobs:
         if: ${{ steps.due.outputs.health == 'true' }}
         timeout-minutes: 8
         env:
-          GH_TOKEN: ${{ secrets.CGWALTERS_BOT_PAT }}
+          # The read token until the supervisor applies: the pass only reads.
+          GH_TOKEN: ${{ vars.SUPERVISOR == 'apply' && secrets.JMARRERO_BOT_PAT || secrets.JMARRERO_BOT_READ_TOKEN }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           "$RUNNER_TEMP/agent-board/bin/agent-board" supervise health \
@@ -218,7 +234,7 @@ jobs:
   agent:
     needs: health
     if: ${{ (vars.SUPERVISOR == 'preview' || vars.SUPERVISOR == 'apply') && needs.health.outputs.act == 'true' }}
-    uses: cgwalters-forge/actions/.github/workflows/cgwalters-agentic-job.yml@main
+    uses: jmarrero-forge/actions/.github/workflows/jmarrero-agentic-job.yml@077c8a5675c88bb3771cba65e77e0672f98c1485 # main, agentic-job v0.6.2 (actions#2)
     permissions:
       contents: read
       issues: write
@@ -236,7 +252,7 @@ jobs:
       budget: ${{ needs.health.outputs.budget }}
       apply-environment: agent-apply
     secrets:
-      SAFE_OUTPUTS_PAT: ${{ secrets.CGWALTERS_BOT_PAT }}
+      SAFE_OUTPUTS_PAT: ${{ secrets.JMARRERO_BOT_PAT }}
 
   # Runs no agent-produced code: it parses the requests as data.
   execute:
@@ -277,7 +293,7 @@ jobs:
         if: ${{ vars.SUPERVISOR == 'apply' }}
         timeout-minutes: 8
         env:
-          GH_TOKEN: ${{ secrets.CGWALTERS_BOT_PAT }}
+          GH_TOKEN: ${{ secrets.JMARRERO_BOT_PAT }}
           RESULT_URL: ${{ needs.agent.outputs.result-url }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |

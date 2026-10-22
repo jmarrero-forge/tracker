@@ -9,15 +9,12 @@
 # per-repository list of its own: the repositories named here are the only
 # ones a fix may target.
 hosts = ["github.com"]
-# Includes every repository the poll follows; misctool remains fixable by
-# hand but is not followed until it has a review workflow. bootc-dev/* by
-# the operator's decision D17 (docs/operator-notes.md, 2026-10-17), which
-# names the organization: fix rounds on the bot's own
-# pull requests there, from its fork; since #710 also from the midstream
-# fork cgwalters-forge/bootc (`bot/**` below says how apply bounds the head
-# repository). A fix there may not edit `.github` or AGENTS.md (not listed
-# below).
-repos = ["cgwalters-forge/tracker", "cgwalters-forge/actions", "cgwalters-forge/agenthome", "cgwalters-forge/agentic-job", "cgwalters-forge/agent-board", "cgwalters-forge-stage/board-test", "cgwalters-forge/review", "cgwalters-forge/misctool", "bootc-dev/*", "cgwalters-forge/composefs-rs", "cgwalters-forge/bootc", "cgwalters-forge/forge-infra"]
+# Includes every repository the poll follows, and dispatch.toml's others.
+# bootc-dev/* as upstream has it: fix rounds on the bot's own pull requests
+# there, from its fork or the forge's (`bot/**` below says how apply bounds
+# the head repository), only once the poll applies (jmarrero-forge/tracker#42).
+# A fix there may not edit `.github` or AGENTS.md (not listed below).
+repos = ["jmarrero-forge/tracker", "jmarrero-forge/actions", "jmarrero-forge/review", "jmarrero-forge/homegit", "jmarrero-forge/bootc", "jmarrero-forge/ostree", "jmarrero-forge/rpm-ostree", "bootc-dev/*"]
 bases = ["main"]
 max_outputs = 3
 max_patch_bytes = 1048576
@@ -66,7 +63,7 @@ missing_data = { max = 1 }
 [unprotected_files]
 # The same list as dispatch.toml's, which poll.test.cjs checks;
 # the precondition for listing a repository is in its comment.
-repos = ["cgwalters-forge/agentic-job", "cgwalters-forge/agent-board", "cgwalters-forge/tracker", "cgwalters-forge/review", "cgwalters-forge/actions", "cgwalters-forge/agenthome", "cgwalters-forge/misctool"]
+repos = []
 # README.md too: a docs run there is refused otherwise (cgwalters-forge/agent-board#49).
 # And every other name on agentic-job's default protected list, by the
 # operator's decision (21 Oct): a blocked manifest or lockfile meant a run

@@ -28,7 +28,9 @@ concurrency:
 jobs:
   publish:
     # The bot's token is only for this file as the default branch has it.
-    if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    # Off until the repository variable USAGE is `apply`: publishing is a
+    # write, and nothing here writes before cutover (jmarrero-forge/tracker#42).
+    if: ${{ vars.USAGE == 'apply' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     # The identity token is the tailnet join's; the comment is written with
@@ -46,22 +48,27 @@ jobs:
       - name: Check published observations
         id: freshness
         env:
-          GH_TOKEN: ${{ secrets.CGWALTERS_BOT_PAT }}
+          GH_TOKEN: ${{ secrets.JMARRERO_BOT_PAT }}
         run: just publish-usage --check-freshness
       # The same join, tags and proxy setting as the agent job's, which the
       # broker admits by being on the tailnet.
       - name: Join the tailnet
         if: steps.freshness.outputs.publish == 'true'
         id: tailnet
-        uses: cgwalters-forge/actions/tailscale@main
+        uses: jmarrero-forge/actions/tailscale@main
         with:
           hostname: usage-${{ github.run_id }}-${{ github.run_attempt }}
+          # The wrapper's tailnet login and tags; our tailnets.json entry
+          # names neither, nor the broker.
+          oauth-client-id: ${{ vars.AGENTIC_JOB_TAILSCALE_OAUTH_CLIENT_ID }}
+          tags: ${{ vars.AGENTIC_JOB_TAILSCALE_TAGS }}
+          proxy: ${{ vars.INFERENCE_URL }}
       - name: Publish
         if: steps.freshness.outputs.publish == 'true'
         env:
           # The organization secret poll.yml uses: the comment is the bot's,
           # on a private repository of the organization.
-          GH_TOKEN: ${{ secrets.CGWALTERS_BOT_PAT }}
+          GH_TOKEN: ${{ secrets.JMARRERO_BOT_PAT }}
           # As the agent job resolves it: the variable, else the
           # organization's tailnet setting.
           INFERENCE_URL: ${{ vars.INFERENCE_URL || steps.tailnet.outputs.proxy }}

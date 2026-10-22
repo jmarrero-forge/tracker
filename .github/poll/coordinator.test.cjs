@@ -6,6 +6,12 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+// This deployment's pools.json and agent-board.json are retargeted from
+// upstream's, which these tests are written against. They run on upstream's
+// copies in testdata, which a resync refreshes (README, "This deployment").
+const UPSTREAM_POOLS = require.resolve('../agentic-job/pools.json');
+require.cache[UPSTREAM_POOLS] = { id: UPSTREAM_POOLS, filename: UPSTREAM_POOLS, loaded: true,
+  exports: require('./testdata/upstream-pools.json') };
 const { changedFingerprint, dailyDue, decision, health, loadConfig, main, pass, record, reportPull, statusProse, brief, applyConfig } = require('./coordinator.cjs');
 
 const now = Date.parse('2026-10-14T11:00:00Z');
@@ -241,7 +247,7 @@ test('health reports blocked, absent and unread board facts', () => {
 });
 
 test('coordinator pools default independently and reject unknown pool names', () => {
-  const source = JSON.parse(fs.readFileSync(require.resolve('./agent-board.json'), 'utf8'));
+  const source = JSON.parse(fs.readFileSync(require.resolve('./testdata/upstream-agent-board.json'), 'utf8'));
   assert.equal(loadConfig(JSON.stringify(source)).planPool, 'claude');
   assert.equal(loadConfig(JSON.stringify(source)).statusPool, 'openai');
   delete source.coordinator.planPool;
@@ -261,7 +267,7 @@ test('coordinator pools default independently and reject unknown pool names', ()
 });
 
 test('planning and status dispatch use their own configured pools', async () => {
-  const source = JSON.parse(fs.readFileSync(require.resolve('./agent-board.json'), 'utf8'));
+  const source = JSON.parse(fs.readFileSync(require.resolve('./testdata/upstream-agent-board.json'), 'utf8'));
   for (const overrides of [{}, { planPool: 'openai', statusPool: 'claude' }]) {
     const config = loadConfig(JSON.stringify({ ...source, coordinator: { ...source.coordinator, ...overrides } }));
     const h = harness(true);

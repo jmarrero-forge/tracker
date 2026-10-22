@@ -41,6 +41,31 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Whether the read token exists yet: a job cannot test a secret in its
+  # `if:`, so this one says it as an output, and without the token the two
+  # below are skipped with a notice rather than failing every pass. Every
+  # pass reads with it until its lane is `apply`, which takes the bot's
+  # write token instead (README, "Lanes").
+  token:
+    if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions: {}
+    outputs:
+      ready: ${{ steps.token.outputs.ready }}
+    steps:
+      - name: Check for the read token
+        id: token
+        env:
+          READ_TOKEN: ${{ secrets.JMARRERO_BOT_READ_TOKEN }}
+        run: |
+          if [[ -n "$READ_TOKEN" ]]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::JMARRERO_BOT_READ_TOKEN is not set; skipping this pass (README, Setup)"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
   # The board scheduler (#401): starts the run an accepted plan on an open
   # sub-issue of a live epic proposes, if it is an implement one, up to the cap in
   # agent-board.json's `schedule`; .github/poll/schedule.cjs and the README
@@ -50,7 +75,8 @@ jobs:
   # job, so two passes never decide on the same board; fix runs the poll
   # job starts in the same pass are counted against the cap in the next.
   board:
-    if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    needs: token
+    if: ${{ needs.token.outputs.ready == 'true' }}
     runs-on: ubuntu-26.04
     # The build, scheduler, census and coordinator each have their own bound;
     # leave room for all four and just setup inside the job's limit.
@@ -81,8 +107,9 @@ jobs:
         env:
           # The bot's token reads the organization's board, and is what
           # `agent-board dispatch --apply` requires: a planner's own token,
-          # under which it records each plan it starts.
-          GH_TOKEN: ${{ secrets.CGWALTERS_BOT_PAT }}
+          # under which it records each plan it starts. A preview reads with
+          # the read token, which can write nothing.
+          GH_TOKEN: ${{ !inputs.dry-run && vars.BOARD_DISPATCH == 'apply' && secrets.JMARRERO_BOT_PAT || secrets.JMARRERO_BOT_READ_TOKEN }}
           DISPATCH_TOKEN: ${{ github.token }}
           AGENT_BOARD: ${{ runner.temp }}/agent-board/bin/agent-board
           # The runs this pass starts, which the coordinator counts against
@@ -112,7 +139,7 @@ jobs:
         continue-on-error: true
         timeout-minutes: 5
         env:
-          GH_TOKEN: ${{ secrets.CGWALTERS_BOT_PAT }}
+          GH_TOKEN: ${{ !inputs.dry-run && vars.BOARD_DISPATCH == 'apply' && secrets.JMARRERO_BOT_PAT || secrets.JMARRERO_BOT_READ_TOKEN }}
         shell: bash
         run: node .github/poll/epics.cjs | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
@@ -125,7 +152,7 @@ jobs:
         continue-on-error: true
         timeout-minutes: 8
         env:
-          GH_TOKEN: ${{ secrets.CGWALTERS_BOT_PAT }}
+          GH_TOKEN: ${{ !inputs.dry-run && vars.COORDINATOR == 'apply' && secrets.JMARRERO_BOT_PAT || secrets.JMARRERO_BOT_READ_TOKEN }}
           DISPATCH_TOKEN: ${{ github.token }}
           AGENT_BOARD: ${{ runner.temp }}/agent-board/bin/agent-board
           BOARD_DISPATCHED: ${{ runner.temp }}/board-dispatched
@@ -134,10 +161,15 @@ jobs:
         run: just coordinator ${APPLY:+"$APPLY"}
 
   # One actor, built from repository-owned configuration on the default branch.
+  # Unlike upstream's it only previews, like a dry run, until the repository
+  # variable PR_POLL is `apply`: our own coordinator still merges and reworks
+  # the bot's pull requests, and two actors must never apply on the same
+  # ones (jmarrero-forge/tracker#42).
   poll:
-    if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    needs: token
+    if: ${{ needs.token.outputs.ready == 'true' }}
     runs-on: ubuntu-26.04
-    # Usage/supervisor/train dispatch (3), build (10), restore (2), pass (6), upload (2), successor wait (5),
+    # Usage/supervisor dispatch (2), build (10), restore (2), pass (6), upload (2), successor wait (5),
     # plus five minutes for checkout/setup and dispatch overhead.
     timeout-minutes: 33
     permissions:
@@ -161,7 +193,7 @@ jobs:
       # Explicit workflow_dispatch works with that token, even while idle;
       # usage's freshness check and concurrency bound the work it starts.
       - name: Refresh usage
-        if: ${{ !inputs.dry-run }}
+        if: ${{ !inputs.dry-run && vars.USAGE == 'apply' }}
         continue-on-error: true
         timeout-minutes: 1
         env:
@@ -179,16 +211,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: just start-supervisor
-      # Cron starvation can leave a due release waiting indefinitely. Reuse
-      # the train's opt-in and serialized, cheap due check, not a second clock.
-      - name: Start release train
-        if: ${{ !inputs.dry-run && (vars.RELEASE_TRAIN == 'dry-run' || vars.RELEASE_TRAIN == 'apply') }}
-        continue-on-error: true
-        timeout-minutes: 1
-        env:
-          GH_TOKEN: ${{ github.token }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-        run: just start-release-train
       - name: Build agent-board at the branch's head
         id: build
         timeout-minutes: 10
@@ -205,7 +227,7 @@ jobs:
       # this step failing): agent-board allows that, the state being
       # disposable.
       - name: Restore the state of the last pass
-        if: ${{ !inputs.dry-run }}
+        if: ${{ !inputs.dry-run && vars.PR_POLL == 'apply' }}
         continue-on-error: true
         # A stalled artifact read must leave time for the successor dispatch.
         timeout-minutes: 2
@@ -231,14 +253,14 @@ jobs:
         id: pass
         timeout-minutes: 6
         env:
-          GH_TOKEN: ${{ secrets.CGWALTERS_BOT_PAT }}
+          GH_TOKEN: ${{ !inputs.dry-run && vars.PR_POLL == 'apply' && secrets.JMARRERO_BOT_PAT || secrets.JMARRERO_BOT_READ_TOKEN }}
           DISPATCH_TOKEN: ${{ github.token }}
           AGENT_BOARD: ${{ runner.temp }}/agent-board/bin/agent-board
           POLL_STATE: ${{ runner.temp }}/poll-state.json
           # Off until this repository secret is set. The PAT must also have
           # issue read/write access to the private configured decisions issue.
           DECISIONS_STATE_KEY: ${{ secrets.DECISIONS_STATE_KEY }}
-          MODE: ${{ inputs.dry-run && '--dry-run' || '--apply' }}
+          MODE: ${{ !inputs.dry-run && vars.PR_POLL == 'apply' && '--apply' || '--dry-run' }}
         shell: bash
         run: just poll "$MODE"
       # Only a clean pass's state is kept: one that failed may not have
@@ -246,7 +268,7 @@ jobs:
       # pass cannot read into every later pass. Kept long enough to outlast
       # an idle gap of six hours, agent-board's longest.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: ${{ !inputs.dry-run && steps.pass.outcome == 'success' }}
+        if: ${{ !inputs.dry-run && vars.PR_POLL == 'apply' && steps.pass.outcome == 'success' }}
         timeout-minutes: 2
         with:
           name: agent-board-poll-apply-state-${{ steps.build.outputs.rev }}
@@ -256,7 +278,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 2
       - name: Start the next pass while active or after a failure
-        if: ${{ !cancelled() && !inputs.dry-run && (failure() || steps.pass.outputs.in-flight == 'true') }}
+        if: ${{ !cancelled() && !inputs.dry-run && vars.PR_POLL == 'apply' && (failure() || steps.pass.outputs.in-flight == 'true') }}
         env:
           GH_TOKEN: ${{ github.token }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}

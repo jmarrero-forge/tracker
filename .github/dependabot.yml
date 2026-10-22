@@ -1,5 +1,6 @@
 # Moves the commit pins of third-party actions daily (#544). Our own
-# workflows and actions are followed at main and are not pinned.
+# actions are followed at main; our wrappers are pinned by commit, which
+# moves by hand with the broker's admission.
 version: 2
 updates:
   - package-ecosystem: github-actions

@@ -1,7 +1,7 @@
 {
-  "repo": "cgwalters-forge/bot-ops",
+  "repo": "jmarrero-forge/bot-ops",
   "issue": 1,
-  "bot": "cgwalters-bot",
+  "bot": "jmarrero-bot",
   "pacing": {
     "claude": { "target": 0.95, "burst": 95 },
     "openai": { "target": 0.95, "burst": 3 }

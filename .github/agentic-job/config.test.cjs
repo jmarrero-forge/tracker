@@ -22,8 +22,10 @@ test('acp-experiment.toml is hosted.toml and a child agent, and hosted.toml has 
   // Every run on the mistral pool, main agent or child, gets GLM a window
   // well over Vibe's 32k default (#651); the copy above holds both files to it.
   assert.match(hosted, /^\[agent\.context-windows\]\n"zai-glm-5-3" = 131072\n/m);
-  // The child's model is the mistral pool's, the one dispatch can select.
-  assert.equal(require('./pools.json').mistral.model, 'zai-glm-5-3');
+  // The child's model is upstream's mistral pool's. This deployment has no
+  // mistral pool (its broker serves Claude only), so dispatching
+  // acp-experiment here fails at the broker; the file stays upstream's.
+  assert.equal(require('./pools.json').mistral, undefined);
 });
 
 // Pool settings may name a tier for its automatic pools (tracker#837), so
@@ -35,9 +37,9 @@ test('every pool has a tier, and tier-1 and tier-2 each an automatic pool', () =
     assert.ok(pool.auto === undefined || typeof pool.auto === 'boolean', `${name}.auto`);
   }
   const tier = n => Object.keys(pools).filter(p => pools[p].tier === n && pools[p].auto !== false);
-  assert.deepEqual(tier(1), ['claude', 'openai']);
-  assert.deepEqual(tier(2), ['mistral']);
-  assert.deepEqual([pools.fable.tier, pools.fable.auto], [1, false]);
+  // This deployment's broker serves Claude only: no tier 2 yet.
+  assert.deepEqual(tier(1), ['claude']);
+  assert.deepEqual(tier(2), []);
 });
 
 test('dispatch passes the run only a configuration from its closed set', () => {
@@ -106,29 +108,15 @@ test('agentic-job config takes acp-experiment.toml, and refuses it without the c
 // other fields of each entry stay as they were.
 const outputs = name => read(name).split('[outputs]\n')[1].split(/^\[/m)[0];
 
-test('misctool is a dispatch and fix target with matching workflow-edit bounds', () => {
+test('dispatch and fix have the same targets and workflow-edit bounds', () => {
   const lists = name => [...read(name).matchAll(/^repos = (\[.*\])$/gm)].map(m => JSON.parse(m[1]));
   const dispatchLists = lists('dispatch.toml');
   const fixLists = lists('fix.toml');
   for (const [name, bounds] of [['dispatch', dispatchLists], ['fix', fixLists]]) {
     assert.equal(bounds.length, 2, name);
-    for (const repos of bounds) assert.ok(repos.includes('cgwalters-forge/misctool'), name);
   }
   // Less bootc-dev/*, which fix has and dispatch has not (D17, below).
   for (let i = 0; i < 2; i++) assert.deepEqual([...dispatchLists[i]].sort(), fixLists[i].filter(r => r !== 'bootc-dev/*').sort());
-});
-
-// forge-infra (#812) is followed and a target, but no run may edit its
-// `.github/` or protected files until a per-repository ruleset is on its
-// main; for now the organization's ruleset is its only gate.
-test('forge-infra is a followed target without unprotected files', () => {
-  const repo = 'cgwalters-forge/forge-infra';
-  for (const name of ['dispatch.toml', 'fix.toml', 'comment.toml']) assert.ok(repos(name).includes(repo), name);
-  for (const name of ['dispatch.toml', 'fix.toml']) {
-    const listed = /^repos = (\[.*\])$/m.exec(read(name).split(/^\[unprotected_files\]$/m)[1])[1];
-    assert.ok(!JSON.parse(listed).includes(repo), name);
-  }
-  assert.ok(JSON.parse(fs.readFileSync(path.join(__dirname, '../poll/agent-board.json'), 'utf8')).follow.includes(repo));
 });
 
 test('dispatch.toml and fix.toml open complete work ready', () => {
@@ -136,13 +124,11 @@ test('dispatch.toml and fix.toml open complete work ready', () => {
   assert.match(outputs('fix.toml'), /^push_to_pull_request_branch = \{ max = 1, branches = \["dispatch\/\*\*", "bot\/\*\*", "release-train\/\*\*"\], replacement_max_commits = 5, ready_when_complete = true \}$/m);
 });
 
-// D17 (docs/operator-notes.md, 2026-10-17): bootc-dev is open to
-// comment-only kinds and to fix, and to nothing else; comment.toml is
-// dispatch.toml's targets with no pull request.
+// As upstream has it (its D17): bootc-dev is open to comment-only kinds and to
+// fix, and to nothing else; comment.toml is dispatch.toml's targets with no
+// pull request.
 const repos = name => JSON.parse(/^repos = (\[.*\])$/m.exec(read(name).split(/^\[/m)[0])[1]);
 test('only triage, research and fix may target bootc-dev', () => {
-  assert.match(fs.readFileSync(path.join(__dirname, '../../docs/operator-notes.md'), 'utf8'),
-    /^D17 \(which bootc-dev runs .*\*\*B\*\*\. .*Fix rounds run on the bot's own bootc-dev pull requests.*Triage and research answers may also be posted/m);
   assert.deepEqual(repos('comment.toml'), [...repos('dispatch.toml'), 'bootc-dev/*']);
   assert.deepEqual(repos('fix.toml').filter(r => r.startsWith('bootc-dev')), ['bootc-dev/*']);
   assert.ok(!repos('dispatch.toml').some(r => r.startsWith('bootc-dev')));
@@ -169,7 +155,7 @@ test('agentic-job policy admits bootc-dev only for comments and fixes', { skip: 
     '--head', '0'.repeat(40), '--output-repo', repo], { stdio: 'pipe' }).status;
   // The bot's dispatch branches, and the homegit era's bot/** ones (#710),
   // in bootc-dev and in the midstream forks; no other branch pattern.
-  for (const repo of ['bootc-dev/bootc', 'cgwalters-forge/bootc', 'cgwalters-forge/composefs-rs']) {
+  for (const repo of ['bootc-dev/bootc', 'jmarrero-forge/bootc', 'jmarrero-forge/ostree']) {
     for (const branch of ['dispatch/x', 'bot/install-output', 'bot/a/b']) assert.equal(fix(repo, branch), 0, `${repo} ${branch}`);
     for (const branch of ['main', 'feature/x', 'BOT/x', 'bots/x', 'x/bot/y']) assert.notEqual(fix(repo, branch), 0, `${repo} ${branch}`);
   }
@@ -177,15 +163,15 @@ test('agentic-job policy admits bootc-dev only for comments and fixes', { skip: 
   // This is the target, not a pull request's head repository: the policy is
   // never told the head, which apply bounds instead (fix.toml's comment on
   // `bot/**`), so no test here can refuse a head owner.
-  for (const repo of ['someone/bootc', 'cgwalters-bot/bootc', 'containers/composefs-rs']) assert.notEqual(fix(repo, 'bot/x'), 0, repo);
+  for (const repo of ['someone/bootc', 'jmarrero-bot/bootc', 'containers/composefs-rs']) assert.notEqual(fix(repo, 'bot/x'), 0, repo);
 });
 
 // The policy job's own reading of the bounds, so a spelling it ignores fails.
 test('agentic-job policy keeps ready_when_complete from both bounds', { skip: !agenticJob && 'agentic-job is not installed' }, () => {
   const policy = (file, type, ...args) => JSON.parse(execFileSync('agentic-job', ['policy', '--allow', path.join(__dirname, file),
-    '--repo', 'cgwalters-forge/tracker', '--clone-url', 'https://github.com/cgwalters-forge/tracker',
+    '--repo', 'jmarrero-forge/tracker', '--clone-url', 'https://github.com/jmarrero-forge/tracker',
     '--kind', 'branch', '--outputs', `${type},noop`, '--max-outputs', '3', ...args], { encoding: 'utf8' }));
   assert.equal(policy('dispatch.toml', 'create_pull_request', '--base', 'main').safe_outputs.create_pull_request.ready_when_complete, true);
   assert.equal(policy('fix.toml', 'push_to_pull_request_branch', '--base', 'dispatch/x', '--pull-request', '1',
-    '--head', '0'.repeat(40), '--output-repo', 'cgwalters-forge/tracker').safe_outputs.push_to_pull_request_branch.ready_when_complete, true);
+    '--head', '0'.repeat(40), '--output-repo', 'jmarrero-forge/tracker').safe_outputs.push_to_pull_request_branch.ready_when_complete, true);
 });

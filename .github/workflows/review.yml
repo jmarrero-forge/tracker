@@ -1,5 +1,5 @@
 # An agent's review of every pull request here, through our deployment's
-# review entrypoint, cgwalters-forge/actions' cgwalters-review.yml, which
+# review entrypoint, jmarrero-forge/actions' jmarrero-review.yml, which
 # composes agentic-job v0.6.2's review jobs with our tailnet join and
 # inference defaults, and admits PRs as agentic-job's review.yml did
 # (#625). It reads its bounds (workflow/review.toml,
@@ -17,6 +17,9 @@
 # one and the review's own bounds and task included (agentic-job#540; the operator's
 # decision is in docs/operator-notes.md, "2026-10-13, the harness evolving
 # itself").
+# Off until the repository variable AGENT_REVIEW is set: a review comments
+# on the pull request, and nothing here writes before the review gate is set
+# up (jmarrero-forge/tracker#41).
 # No workflow-ingress check runs here, and ci runs from the pull request's
 # head, so for every change to .github/ and workflow/ the model's verdict
 # is the only gate.
@@ -33,10 +36,10 @@ permissions: {}
 jobs:
   review:
     if: >-
-      github.event_name == 'pull_request_target' ||
-      (github.event.issue.pull_request && startsWith(github.event.comment.body, '/review'))
+      vars.AGENT_REVIEW != '' && (github.event_name == 'pull_request_target' ||
+      (github.event.issue.pull_request && startsWith(github.event.comment.body, '/review')))
     # Base-owned policy; the head is fetched only as data inside the sandbox.
-    uses: cgwalters-forge/actions/.github/workflows/cgwalters-review.yml@d8e22f71b2abbe5f41306a0c7ef1b6c3d2829cac # main, agentic-job v0.6.2 (actions#67)
+    uses: jmarrero-forge/actions/.github/workflows/jmarrero-review.yml@077c8a5675c88bb3771cba65e77e0672f98c1485 # main, agentic-job v0.6.2 (actions#2)
     # The union of the wrapper's job grants: statuses for its compatibility
     # status, id-token for the tailnet join. No SAFE_OUTPUTS_PAT: the
     # wrapper gives it only to apply, the comment fallback; real reviews

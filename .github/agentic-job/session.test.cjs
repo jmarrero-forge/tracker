@@ -99,11 +99,11 @@ test('idle wait, target and task are bounded', () => {
 test('workflow uses only configured targets and the wrapper session path', () => {
   const workflow = read('../workflows/session.yml');
   assert.match(workflow, /workflow_dispatch:/);
-  assert.match(workflow, /options: \[claude, openai, mistral\]\n\s+default: claude/);
+  assert.match(workflow, /options: \[claude\]\n\s+default: claude/);
   assert.match(workflow, /if: github.ref == format\('refs\/heads\/\{0\}', github.event.repository.default_branch\)/);
   assert.match(workflow, /runs-on: ubuntu-26.04/);
   assert.doesNotMatch(workflow, /ubuntu-latest|secrets: inherit|inputs\.(repo|item|operators|origins)/);
-  assert.match(workflow, /uses: cgwalters-forge\/actions\/\.github\/workflows\/cgwalters-agentic-job.yml@main/);
+  assert.match(workflow, /uses: jmarrero-forge\/actions\/\.github\/workflows\/jmarrero-agentic-job.yml@077c8a5675c88bb3771cba65e77e0672f98c1485 /);
   for (const output of ['repo', 'item', 'idle', 'task', 'agent', 'model', 'budget']) {
     assert.ok(workflow.includes(`needs.profile.outputs.${output}`));
   }
