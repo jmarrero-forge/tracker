@@ -65,7 +65,8 @@ test('workflow checks freshness before joining and uses only default-branch code
 
 test('the repository config and the Mistral allowance in pools.json are usable', () => {
   checkConfig(CONFIG);
-  assert.ok(mistralAllowance(POOLS.mistral, load(), NOW), 'pools.json mistral.allowance is one usage.cjs can publish');
+  // This deployment has no mistral pool (its broker serves Claude only).
+  if (POOLS.mistral) assert.ok(mistralAllowance(POOLS.mistral, load(), NOW), 'pools.json mistral.allowance is one usage.cjs can publish');
   for (const bad of [{ ...CONFIG, repo: 'bot-ops' }, { ...CONFIG, issue: 0 }, { ...CONFIG, pacing: { claude: PACING } }]) {
     assert.throws(() => checkConfig(bad));
   }

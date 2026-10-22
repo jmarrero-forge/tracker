@@ -5,6 +5,15 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { after, test } = require('node:test');
+// This deployment's pools.json and agent-board.json are retargeted from
+// upstream's, which these tests are written against. They run on upstream's
+// copies in testdata, which a resync refreshes (README, "This deployment");
+// the tests that read agent-board.json from disk check this deployment's.
+for (const [file, fixture] of [['../agentic-job/pools.json', './testdata/upstream-pools.json'],
+  ['./agent-board.json', './testdata/upstream-agent-board.json']]) {
+  const id = require.resolve(file);
+  require.cache[id] = { id, filename: id, loaded: true, exports: require(fixture) };
+}
 const { FILL_PAGES, FILL_QUERY, ITEM_QUERY, agentBoard, batchReleased, candidates, choosePool, decide, eligibility, fillItems, findRecord, idleLine, loadConfig, main, openPullRefs, operatorRetries, operatorRetryTask, paceMode, pacing, planInterval, resolvePools, probePlan, pullIssues, readDryRun, readFillIssues, readOutcome, readRefusal, readRuns, readTriage, requestedItems, triageRecord, triageTask } = require('./schedule.cjs');
 const { census } = require('./epics.cjs');
 const { render } = require('../usage/usage.cjs');
@@ -223,7 +232,7 @@ test("an item outside the followed repositories, or a plan that leads out of the
 // with a plan for itself.
 test('the first preview, again: the slots go to the oldest P0 items of followed repositories', async () => {
   const nodes = JSON.parse(fs.readFileSync(path.join(__dirname, 'testdata', 'board-preview.json'), 'utf8'));
-  const config = loadConfig(fs.readFileSync(path.join(__dirname, 'agent-board.json'), 'utf8'));
+  const config = loadConfig(fs.readFileSync(path.join(__dirname, 'testdata', 'upstream-agent-board.json'), 'utf8'));
   const subs = nodes.filter(n => n.content.__typename === 'Issue').map(({ content: c, priority }) => ({
     repository: c.repository.nameWithOwner, number: c.number, state: c.state.toLowerCase(), url: c.url, created: c.createdAt, priority: priority?.name ?? null,
   }));
@@ -446,7 +455,7 @@ test('an epic that cannot be read gives no candidates, and is counted', async ()
 // main over a stubbed API: `rest` answers GETs by path, without the first
 // page's paging; GraphQL gets `board` (null: not readable) and no comments. Returns the lines it
 // logged, the requests it made and what it threw.
-const REPO_CONFIG = JSON.parse(fs.readFileSync(path.join(__dirname, 'agent-board.json'), 'utf8'));
+const REPO_CONFIG = JSON.parse(fs.readFileSync(path.join(__dirname, 'testdata/upstream-agent-board.json'), 'utf8'));
 const EPICS = REPO_CONFIG.epics.repository;
 const epicIssue = n => ({ number: n, state: 'open', updated_at: 't', html_url: `https://github.com/${EPICS}/issues/${n}`, repository_url: `https://api.github.com/repos/${EPICS}` });
 const labelled = login => [{ event: 'labeled', actor: { login }, label: { name: 'epic' } }];

@@ -33,8 +33,8 @@ test('supervisor builds the shared actor and keeps write jobs gated', () => {
   assert.deepEqual(fs.readdirSync(path.join(root, '.github/supervisor')), ['config.json']);
   const config = JSON.parse(fs.readFileSync(path.join(root, '.github/supervisor/config.json')));
   const board = JSON.parse(fs.readFileSync(path.join(root, '.github/poll/agent-board.json')));
-  assert.deepEqual(config.agent.requests, { repository: 'cgwalters-forge/tracker', issue: 656 });
-  assert.deepEqual(config.agent.log, { repository: 'cgwalters-forge/operator', issue: 2 });
+  assert.deepEqual(config.agent.requests, { repository: 'jmarrero-forge/tracker', issue: 9001 });
+  assert.deepEqual(config.agent.log, { repository: 'jmarrero-forge/bot-ops', issue: 9002 });
   // The executor enforces these caps whatever the agent asks for. Small at the
   // 17 Oct cutover; raised on 20 Oct when the pools sat far below pace.
   assert.equal(config.agent.maxDispatchesPerPass, 4);
@@ -58,13 +58,13 @@ test('supervisor builds the shared actor and keeps write jobs gated', () => {
     }
   }
   assert.deepEqual(stated, caps);
-  assert.deepEqual(config.agent.state, { repository: 'cgwalters-forge/tracker', issue: 718 });
+  assert.deepEqual(config.agent.state, { repository: 'jmarrero-forge/tracker', issue: 9003 });
   for (const other of [config.agent.requests, config.agent.log]) {
     assert.ok(other.repository.toLowerCase() !== config.agent.state.repository.toLowerCase()
       || other.issue !== config.agent.state.issue);
   }
   assert.ok(board.follow.includes(config.agent.state.repository));
-  assert.equal(config.agent.tracker, 'cgwalters-forge/tracker');
+  assert.equal(config.agent.tracker, 'jmarrero-forge/tracker');
   assert.match(config.agent.project, /^PVT_/);
 });
 

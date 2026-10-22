@@ -5,18 +5,10 @@
 set positional-arguments
 
 # Every test of the scripts under .github.
-test: test-poll test-usage test-session test-tools test-config test-release-train test-scripts
+test: test-poll test-usage test-session test-tools test-config test-scripts
 
 test-scripts:
     node --test scripts/*.test.cjs
-
-test-release-train:
-    node --test .github/release-train/*.test.cjs
-
-# One pass of the release train (release-train.yml); without --apply it
-# prints the step it would take. GH_TOKEN is the bot's token.
-release-train *args:
-    node .github/release-train/train.cjs "$@"
 
 test-tools:
     node --test .github/agentic-job/tools.test.cjs
@@ -60,10 +52,6 @@ refresh-usage:
 # Without a prompt: supervisor.yml paces it as a poll-chain start.
 start-supervisor:
     gh workflow run supervisor.yml --repo "$GITHUB_REPOSITORY" --ref "$DEFAULT_BRANCH"
-
-# Reuse the release train's due check; poll.yml gates this on its existing opt-in.
-start-release-train:
-    gh workflow run release-train.yml --repo "$GITHUB_REPOSITORY" --ref "$DEFAULT_BRANCH"
 
 # Validate against the actor that will consume the config, not a moving head.
 build-supervisor-agent-board:

@@ -75,14 +75,11 @@ packages = ["python3-venv", "nftables", "just"]
 #   static.crates.io  the crates, checked against Cargo.lock
 #   github.com        git dependencies (git fetch is already allowed)
 # Their build scripts and proc macros run as the sandbox user.
-"cgwalters-forge/agentic-job" = ["cargo"]
-"cgwalters-forge/agent-board" = ["cargo"]
-"cgwalters-forge/tracker" = ["cargo"]
-"cgwalters-forge/misctool" = ["cargo"]
-# The midstream forks (epic #160). composefs-rs builds with pkg-config and
-# OpenSSL for its HTTP fetch; bootc also links libostree, glib and zstd.
-"cgwalters-forge/composefs-rs" = ["cargo", "pkg-config", "libssl-dev"]
-"cgwalters-forge/bootc" = ["cargo", "pkg-config", "libssl-dev", "libostree-dev", "libglib2.0-dev", "libzstd-dev"]
+"jmarrero-forge/tracker" = ["cargo"]
+# The forge's forks of the upstreams. bootc links libostree, glib and zstd
+# and builds with pkg-config and OpenSSL; ostree and rpm-ostree need more
+# than a package list (autotools, a C/C++ build), so they have none yet.
+"jmarrero-forge/bootc" = ["cargo", "pkg-config", "libssl-dev", "libostree-dev", "libglib2.0-dev", "libzstd-dev"]
 
 # The window each broker model is given, which Vibe compacts at three
 # quarters of (agentic-job's docs/harness.md). Without an entry a model gets
@@ -98,9 +95,10 @@ packages = ["python3-venv", "nftables", "just"]
 # The login is what `tailscale serve` sends for the operator's untagged
 # devices; a tagged device sends none and is refused.
 [session]
-operators = ["cgwalters@gmail.com"]
-# The review site's chat pane.
-origins = ["https://cgwalters-forge.github.io"]
+# None here yet, so session runs fail closed: jmarrero names his tailnet
+# login and the review site's origin before using one.
+operators = []
+origins = []
 # Send a dispatched run the comments made on its item while it works, so
 # the operator's later direction reaches it instead of being lost
 # (agentic-job#1370). They arrive quoted with author and link, as data.
@@ -108,4 +106,4 @@ watch-item = true
 
 [commit]
 author = "agentic-job <agentic-job@users.noreply.github.com>"
-trailers = ["Assisted-by: https://github.com/cgwalters/cgwalters#llms"]
+trailers = ["Generated-by: AI"]

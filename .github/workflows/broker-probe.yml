@@ -20,12 +20,17 @@ jobs:
           persist-credentials: false
       - name: Join the dispatch tailnet
         id: tailnet
-        uses: cgwalters-forge/actions/tailscale@main
+        uses: jmarrero-forge/actions/tailscale@main
         with:
           hostname: broker-probe-${{ github.run_id }}-${{ github.run_attempt }}
+          # The wrapper's tailnet login and tags; our tailnets.json entry
+          # names neither, nor the broker.
+          oauth-client-id: ${{ vars.AGENTIC_JOB_TAILSCALE_OAUTH_CLIENT_ID }}
+          tags: ${{ vars.AGENTIC_JOB_TAILSCALE_TAGS }}
+          proxy: ${{ vars.INFERENCE_URL }}
       - name: Probe and report
         env:
-          GH_TOKEN: ${{ secrets.CGWALTERS_BOT_PAT }}
+          GH_TOKEN: ${{ secrets.JMARRERO_BOT_PAT }}
           INFERENCE_URL: ${{ vars.INFERENCE_URL || steps.tailnet.outputs.proxy }}
         # Run Node directly: no unchecked release binary runs with the PAT
         # or the job's OIDC grant.

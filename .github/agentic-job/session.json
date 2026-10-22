@@ -1,6 +1,6 @@
 {
-  "enabled": true,
-  "repository": "cgwalters-forge/tracker",
-  "issue": 728,
+  "enabled": false,
+  "repository": "jmarrero-forge/tracker",
+  "issue": 9004,
   "idleMinutes": 10
 }

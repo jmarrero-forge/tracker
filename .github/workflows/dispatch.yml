@@ -1,6 +1,6 @@
 # The dispatch caller that `gh workflow run dispatch.yml`, the board
 # scheduler, the epic coordinator and the pull request poll start. The run itself
-# is our wrapper's, cgwalters-forge/actions' cgwalters-agentic-job.yml: it
+# is our wrapper's, jmarrero-forge/actions' jmarrero-agentic-job.yml: it
 # carries the agentic-job pin, the tailnet join, the inference proxy, the
 # runner and the model. This file keeps what is this repository's: the
 # trigger and its five inputs, the run name, the concurrency, the
@@ -17,8 +17,9 @@
 # `profile` job puts it before the task, so a dispatch carries only what is
 # particular to its item. The wrapper adds its own line on top, which says
 # what the kind may hand back.
-# The wrapper is followed at its main (#544): our own repositories are not
-# pinned by commit, third-party actions are. It sets the agentic-job ref.
+# Unlike upstream's, the wrapper is pinned by commit: jmarrero's broker
+# admits a run by its wrapper's commit, so the pin moves with that admission.
+# It sets the agentic-job ref.
 name: dispatch
 run-name: ${{ inputs.kind }} ${{ inputs.repo }}#${{ inputs.item }}${{ inputs.pool && format(' ({0})', inputs.pool) || '' }}${{ inputs.config == 'acp-experiment' && ' [acp-experiment]' || '' }}
 
@@ -43,7 +44,7 @@ on:
         options: [implement, triage, research, review, fix]
         required: true
       pool:
-        description: "Inference pool: claude, fable, openai or mistral (.github/agentic-job/pools.json); empty uses the variables AGENT and AGENT_MODEL"
+        description: "Inference pool: claude (.github/agentic-job/pools.json); empty uses the variables AGENT and AGENT_MODEL"
         type: string
         default: ''
       config:
@@ -151,7 +152,7 @@ jobs:
 
   run:
     needs: profile
-    uses: cgwalters-forge/actions/.github/workflows/cgwalters-agentic-job.yml@main
+    uses: jmarrero-forge/actions/.github/workflows/jmarrero-agentic-job.yml@077c8a5675c88bb3771cba65e77e0672f98c1485 # main, agentic-job v0.6.2 (actions#2)
     # The most any job of the wrapper has: its agent job takes the reads and
     # the identity token, its policy and apply calls the comment writes.
     permissions:
@@ -187,4 +188,4 @@ jobs:
     # The wrapper hands it to apply, in the environment above, and to the
     # status comment on an item of another repository; to nothing else.
     secrets:
-      SAFE_OUTPUTS_PAT: ${{ secrets.CGWALTERS_BOT_PAT }}
+      SAFE_OUTPUTS_PAT: ${{ secrets.JMARRERO_BOT_PAT }}

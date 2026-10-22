@@ -15,7 +15,7 @@ test('usage refresh is independent of poll activity and survives build failures 
   const workflow = fs.readFileSync(path.join(__dirname, '../workflows/poll.yml'), 'utf8');
   const step = workflow.match(/      - name: Refresh usage\n([\s\S]*?)(?=      - name:)/);
   assert.ok(step, 'job-token polls need explicit dispatch, not only workflow_run');
-  assert.match(step[1], /if: \$\{\{ !inputs\.dry-run \}\}/);
+  assert.match(step[1], /if: \$\{\{ !inputs\.dry-run && vars\.USAGE == 'apply' \}\}/);
   assert.match(step[1], /continue-on-error: true/);
   assert.match(step[1], /timeout-minutes: 1/);
   assert.match(step[1], /GH_TOKEN: \$\{\{ github\.token \}\}/);
@@ -45,25 +45,18 @@ test('every poll pass starts the supervisor, which paces it and keeps one pendin
   assert.match(supervisor, /^concurrency:\n  group: >-\n(?:    .*\n)+  cancel-in-progress: false\n/m);
 });
 
-test('poll starts only the enabled default-branch release train before expensive work', () => {
+// The release train cuts cgwalters-forge/agentic-job's releases and moves
+// cgwalters' own pins; this deployment follows the pins upstream moves.
+// Every pass needs the read token, which only the default branch's runs see.
+test('no release train runs here, and every pass waits for the read token', () => {
   const workflow = fs.readFileSync(path.join(__dirname, '../workflows/poll.yml'), 'utf8');
-  const step = workflow.match(/      - name: Start release train\n([\s\S]*?)(?=      - name:)/);
-  assert.ok(step);
-  assert.match(step[1], /if: \$\{\{ !inputs\.dry-run && \(vars\.RELEASE_TRAIN == 'dry-run' \|\| vars\.RELEASE_TRAIN == 'apply'\) \}\}/);
-  assert.match(step[1], /continue-on-error: true/);
-  assert.match(step[1], /timeout-minutes: 1/);
-  assert.match(step[1], /GH_TOKEN: \$\{\{ github\.token \}\}/);
-  assert.match(step[1], /DEFAULT_BRANCH: \$\{\{ github\.event\.repository\.default_branch \}\}/);
-  assert.match(step[1], /run: just start-release-train/);
-  assert.ok(step.index < workflow.indexOf('        id: build'));
-  // Both ends refuse other branches: the poll job that dispatches, and the train's pass.
-  assert.match(workflow, /  poll:\n    if: \$\{\{ github\.ref == format\('refs\/heads\/\{0\}', github\.event\.repository\.default_branch\) \}\}/);
-  const recipes = fs.readFileSync(path.join(__dirname, '../../Justfile'), 'utf8');
-  assert.match(recipes, /start-release-train:\n    gh workflow run release-train\.yml --repo "\$GITHUB_REPOSITORY" --ref "\$DEFAULT_BRANCH"/);
-  const train = fs.readFileSync(path.join(__dirname, '../workflows/release-train.yml'), 'utf8');
-  assert.match(train, /concurrency:\n  group: release-train\n  cancel-in-progress: false/);
-  assert.match(train, /cron: '23 \* \* \* \*'/);
-  assert.match(train, /  pass:\n    if: \$\{\{ \(vars\.RELEASE_TRAIN == 'dry-run' \|\| vars\.RELEASE_TRAIN == 'apply'\) && github\.ref == format\('refs\/heads\/\{0\}', github\.event\.repository\.default_branch\) \}\}/);
+  assert.doesNotMatch(workflow, /release.train/i);
+  assert.ok(!fs.existsSync(path.join(__dirname, '../workflows/release-train.yml')));
+  assert.doesNotMatch(fs.readFileSync(path.join(__dirname, '../../Justfile'), 'utf8'), /release.train/);
+  assert.match(workflow, /  token:\n    if: \$\{\{ github\.ref == format\('refs\/heads\/\{0\}', github\.event\.repository\.default_branch\) \}\}/);
+  for (const job of ['board', 'poll']) {
+    assert.match(workflow, new RegExp(`\\n  ${job}:\\n    needs: token\\n    if: \\$\\{\\{ needs\\.token\\.outputs\\.ready == 'true' \\}\\}\\n`));
+  }
 });
 
 // No outage issue is open.
@@ -197,28 +190,20 @@ test('real child buffer overflow fails and keeps the chain alive', async t => {
 
 test('configuration follows review-enabled schedule targets and preserves pool policy', () => {
   const c = require('./agent-board.json');
-  // misctool's first workflow needs operator approval before poll follow-up.
-  assert.ok(c.schedule.repositories.includes('cgwalters-forge/misctool'));
-  assert.ok(!c.follow.includes('cgwalters-forge/misctool'));
-  for (const repo of c.schedule.repositories) {
-    if (repo !== 'cgwalters-forge/misctool') assert.ok(c.follow.includes(repo), repo);
-  }
+  for (const repo of c.schedule.repositories) assert.ok(c.follow.includes(repo), repo);
   const fix = fs.readFileSync(path.join(__dirname, '../agentic-job/fix.toml'), 'utf8');
   for (const repo of c.follow) assert.ok(fix.includes(`"${repo}"`), repo);
   assert.equal(c.dispatchWorkflow, 'dispatch.yml');
   assert.equal(c.reviewWorkflow, 'review.yml');
   // agent-board starts only fix, triage and research runs from these, within
   // the three a pass (its docs/design.md); comment.toml and fix.toml admit
-  // exactly those in bootc-dev (D17, docs/operator-notes.md).
+  // exactly those in bootc-dev, as upstream's do.
   assert.deepEqual(c.operatorComments, { repositories: ['bootc-dev/*'] });
   assert.match(c.operator, /^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/);
-  // Conflicts share the first-round toil pool: do not spend a bounded fix
-  // round on a pool whose conflict runs have returned without a new head.
-  assert.equal(c.toilFixPool, 'openai');
+  // Our broker serves Claude only, so every round is Claude's.
+  assert.equal(c.toilFixPool, 'claude');
   const readme = fs.readFileSync(path.join(__dirname, '../../README.md'), 'utf8');
   assert.match(readme.replace(/\s+/g, ' '), new RegExp(`no failed check\\) goes to \`${c.toilFixPool}\``));
-  // Claude until the hosted wrapper pins agentic-job v0.6.3 (Mistral's loop
-  // guard) and the 22 Oct reset has passed (tracker#792).
   assert.equal(c.kindPools.triage, 'claude');
   assert.equal(c.kindPools.research, 'claude');
   // agent-board's refund reads the same issue as the hold: the probe's, here.
@@ -231,6 +216,16 @@ test('configuration follows review-enabled schedule targets and preserves pool p
   assert.deepEqual(c.mergeQueue, { tries: 3 });
   const pools = require('../agentic-job/pools.json');
   for (const pool of [...c.fixPools, c.toilFixPool, ...Object.values(c.kindPools)]) assert.ok(pools[pool], pool);
+});
+
+// The scheduler's and coordinator's own tests run on upstream's configuration
+// (testdata); this deployment's must load with its own pools.json.
+test("this deployment's agent-board.json loads with its own pools", () => {
+  const text = fs.readFileSync(path.join(__dirname, 'agent-board.json'), 'utf8');
+  const schedule = require('./schedule.cjs').loadConfig(text);
+  assert.deepEqual([schedule.planPools, schedule.triagePools, schedule.operatorRetryPools], [['claude'], ['claude'], ['claude']]);
+  const coordinator = require('./coordinator.cjs').loadConfig(text);
+  assert.deepEqual([coordinator.planPool, coordinator.statusPool], ['claude', 'claude']);
 });
 
 // apply cannot push to a repository the bot owns unless that repository opts
@@ -274,8 +269,9 @@ test('workflow has one acting pass, respects dry-run, and isolates trusted apply
   const job = yml.slice(yml.indexOf('\n  poll:\n'));
   assert.equal((yml.match(/run: just poll /g) ?? []).length, 1);
   assert.doesNotMatch(yml, /node \.github\/poll\/poll.cjs|\n  agent-board:/);
-  assert.match(job, /MODE: \$\{\{ inputs.dry-run && '--dry-run' \|\| '--apply' \}\}/);
-  assert.match(job, /GH_TOKEN: \$\{\{ secrets\./);
+  // Unlike upstream's, a preview until PR_POLL is apply, with the read token.
+  assert.match(job, /MODE: \$\{\{ !inputs.dry-run && vars.PR_POLL == 'apply' && '--apply' \|\| '--dry-run' \}\}/);
+  assert.match(job, /GH_TOKEN: \$\{\{ !inputs.dry-run && vars.PR_POLL == 'apply' && secrets.JMARRERO_BOT_PAT \|\| secrets.JMARRERO_BOT_READ_TOKEN \}\}/);
   assert.match(job, /DISPATCH_TOKEN: \$\{\{ github.token \}\}/);
   assert.match(job, /run: just build-agent-board/);
   assert.match(job, /POLL_STATE: \$\{\{ runner.temp \}\}\/poll-state.json/);
@@ -283,14 +279,14 @@ test('workflow has one acting pass, respects dry-run, and isolates trusted apply
   const justfile = fs.readFileSync(path.join(__dirname, '../../Justfile'), 'utf8');
   assert.match(justfile, /poll \*args:\n +node \.github\/poll\/poll.cjs "\$@"/);
   assert.match(job, /runs-on: ubuntu-26.04/);
-  assert.match(job, /if: \$\{\{ github.ref == format\('refs\/heads\/\{0\}', github.event.repository.default_branch\) \}\}/);
+  assert.match(job, /needs: token\n    if: \$\{\{ needs.token.outputs.ready == 'true' \}\}/);
   assert.match(job, /persist-credentials: false/);
   assert.doesNotMatch(job.slice(0, job.indexOf('steps:')), /continue-on-error/);
-  assert.match(job, /name: Restore the state of the last pass\n +if: \$\{\{ !inputs.dry-run \}\}/);
-  assert.match(job, /if: \$\{\{ !inputs.dry-run && steps.pass.outcome == 'success' \}\}/);
+  assert.match(job, /name: Restore the state of the last pass\n +if: \$\{\{ !inputs.dry-run && vars.PR_POLL == 'apply' \}\}/);
+  assert.match(job, /if: \$\{\{ !inputs.dry-run && vars.PR_POLL == 'apply' && steps.pass.outcome == 'success' \}\}/);
   assert.equal((job.match(/agent-board-poll-apply-state-/g) ?? []).length, 2);
   assert.match(job, /\.path == "\.github\/workflows\/poll.yml" and .head_repository.id == .repository.id/);
-  assert.match(job, /!inputs.dry-run && \(failure\(\) \|\| steps.pass.outputs.in-flight == 'true'\)/);
+  assert.match(job, /!inputs.dry-run && vars.PR_POLL == 'apply' && \(failure\(\) \|\| steps.pass.outputs.in-flight == 'true'\)/);
   const jobMinutes = Number(/^ {4}timeout-minutes: (\d+)$/m.exec(job)[1]);
   const boundedSteps = [...job.matchAll(/^ {8}timeout-minutes: (\d+)$/gm)].reduce((sum, m) => sum + Number(m[1]), 0);
   const waitMinutes = Number(/WAIT_SECONDS: '(\d+)'/.exec(job)[1]) / 60;
@@ -311,8 +307,8 @@ test('pools.json has what dispatch.yml reads, and a well-formed allowance', () =
     assert.match(currency, /^[A-Z]{3}$/, `${name}.allowance.currency`);
     assert.equal(period, 'calendar-month');
   }
-  assert.equal(pools.mistral.budget, '1000');
-  assert.deepEqual(pools.mistral.allowance, { amount: 300, currency: 'USD', period: 'calendar-month' });
+  // Our broker serves Claude only.
+  assert.deepEqual(Object.keys(pools), ['claude']);
 });
 
 test('dispatch.yml turns on the skills for implement and fix only', () => {
@@ -377,7 +373,6 @@ test('dispatch.yml gives an agent without skills the full implement profile', ()
       assert.equal(r.task, expected(kind, skilled));
     }
   }
-  assert.ok(Object.values(pools).some(p => !['claude', 'opencode'].includes(p.agent)));
   assert.ok(Object.values(pools).some(p => ['claude', 'opencode'].includes(p.agent)));
   for (const agent of ['claude', 'opencode', 'fake']) {
     assert.deepEqual(run('', 'implement', agent), { skilled: 'true', agent: '', model: '', budget: '', task: expected('implement', true) });
@@ -390,16 +385,17 @@ test('dispatch.yml gives an agent without skills the full implement profile', ()
   assert.equal(run('', 'implement-full', 'vibe'), null);
 });
 
-test('workflows follow our own repositories at main, review.yml excepted, and pin the rest', () => {
+test('workflows follow our own repositories at main, the wrappers excepted, and pin the rest', () => {
   const owner = CONFIG.dispatchRepo.split('/')[0];
   const dir = path.join(__dirname, '../workflows');
   let seen = 0;
   for (const file of fs.readdirSync(dir).filter(f => f.endsWith('.yml'))) {
     for (const [, ref] of fs.readFileSync(path.join(dir, file), 'utf8').matchAll(/^\s*(?:- )?uses:\s*(\S+)/gm)) {
       seen++;
-      // Except review.yml: its verdict is the only gate on .github/ here,
-      // so the wrapper it calls moves only by a reviewed change to the pin.
-      if (ref.startsWith(`${owner}/`)) assert.match(ref, file === 'review.yml' ? /^[\w.-]+\/[\w.\/-]+@[0-9a-f]{40}$/ : /^[\w.-]+\/[\w.\/-]+@main$/, `${file}: ${ref}`);
+      // Except the wrappers: jmarrero's broker admits a run by its wrapper's
+      // commit, and review.yml's verdict gates .github/ here, so they move
+      // only by a reviewed change to the pin.
+      if (ref.startsWith(`${owner}/`)) assert.match(ref, ref.includes('/.github/workflows/') ? /^[\w.-]+\/[\w.\/-]+@[0-9a-f]{40}$/ : /^[\w.-]+\/[\w.\/-]+@main$/, `${file}: ${ref}`);
       else assert.match(ref, /^[\w.-]+\/[\w.\/-]+@[0-9a-f]{40}$/, `${file}: ${ref}`);
     }
   }
@@ -408,7 +404,7 @@ test('workflows follow our own repositories at main, review.yml excepted, and pi
 
 test('review wrapper uses the agentic-job v0.6.2 release pin', () => {
   const workflow = fs.readFileSync(path.join(__dirname, '../workflows/review.yml'), 'utf8');
-  assert.match(workflow, /^\s+uses: \S+\/cgwalters-review\.yml@d8e22f71b2abbe5f41306a0c7ef1b6c3d2829cac # main, agentic-job v0\.6\.2 \(actions#67\)$/m);
+  assert.match(workflow, /^\s+uses: \S+\/jmarrero-review\.yml@077c8a5675c88bb3771cba65e77e0672f98c1485 # main, agentic-job v0\.6\.2 \(actions#2\)$/m);
 });
 
 test('a GitHub request that stalls fails the call with its method and path', { timeout: 10e3 }, async t => {

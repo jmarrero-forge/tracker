@@ -1,10 +1,12 @@
 # Bounds for dispatch.yml: the repositories a dispatched run may target.
 # Exact names, no globs; add a repository here before dispatching to it.
-# The midstream forks composefs-rs and bootc (epic #160) are targets for
-# staged pull requests only: the poll does not follow them, so nothing merges
-# into their main, which tracks upstream; the operator promotes work upstream.
+# The bot's own repositories in jmarrero-forge, and the forge's forks of
+# the upstreams it works on (bootc, ostree, rpm-ostree), which are targets
+# for staged pull requests only: the poll does not follow them, so nothing
+# merges into their main, which tracks upstream; the operator promotes work
+# upstream.
 hosts = ["github.com"]
-repos = ["cgwalters-forge/tracker", "cgwalters-forge/agentic-job", "cgwalters-forge/agent-board", "cgwalters-forge-stage/board-test", "cgwalters-forge/review", "cgwalters-forge/actions", "cgwalters-forge/agenthome", "cgwalters-forge/misctool", "cgwalters-forge/composefs-rs", "cgwalters-forge/bootc", "cgwalters-forge/forge-infra"]
+repos = ["jmarrero-forge/tracker", "jmarrero-forge/actions", "jmarrero-forge/review", "jmarrero-forge/homegit", "jmarrero-forge/bootc", "jmarrero-forge/ostree", "jmarrero-forge/rpm-ostree"]
 bases = ["main"]
 max_outputs = 3
 max_patch_bytes = 1048576
@@ -27,21 +29,13 @@ missing_data = { max = 1 }
 # prerequisites are in agentic-job's docs/safe-outputs.md. `files` also lets them
 # edit AGENTS.md, a protected file by default, there.
 [unprotected_files]
-# This repository by the operator's decision: docs/operator-notes.md, "2026-10-13, the harness evolving itself".
-# A repository is listed only once a ruleset on its main requires an approving
-# review with stale approvals dismissed on push: that review is the only gate
-# on a run's `.github/` edit there. The organisation's ruleset (25084478) does
-# so on every cgwalters-forge repository; review's own ruleset (24017897)
-# requires none, so there it rests on 25084478 with review's workflow (review#62).
-# Where there is no review workflow, as in misctool, only the operator
-# can give that approval; its first `.github/` change should add one, approved by the
-# operator. actions holds the shared wrapper every repository's runs call, so
-# its gate matters most. Its own ruleset (24147876) requires no approval, but
-# 25084478 with its review workflow (cgwalters-forge/actions#28) makes it the
-# same review gate as agentic-job's. Callers use actions at @main, not a release,
-# so a merge there takes effect at once. Its workflows are under `.github/`;
-# while it was unlisted, no run could change them.
-repos = ["cgwalters-forge/agentic-job", "cgwalters-forge/agent-board", "cgwalters-forge/tracker", "cgwalters-forge/review", "cgwalters-forge/actions", "cgwalters-forge/agenthome", "cgwalters-forge/misctool"]
+# None yet: a repository is listed only once a ruleset on its main requires
+# an approving review with stale approvals dismissed on push, since that
+# review is the only gate on a run's `.github/` edit there, and no
+# jmarrero-forge repository has one (jmarrero-forge/tracker#41). fix.toml
+# keeps the same list. The files and folders below are upstream's, for when
+# one is listed.
+repos = []
 # README.md too: a docs run there is refused otherwise (cgwalters-forge/agent-board#49).
 # And every other name on agentic-job's default protected list, by the
 # operator's decision (21 Oct): a blocked manifest or lockfile meant a run

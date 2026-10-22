@@ -10,7 +10,7 @@ on:
       pool:
         description: Inference pool from pools.json
         type: choice
-        options: [claude, openai, mistral]
+        options: [claude]
         default: claude
       prompt:
         description: Optional public opening prompt
@@ -52,7 +52,7 @@ jobs:
         run: just session-profile
   run:
     needs: profile
-    uses: cgwalters-forge/actions/.github/workflows/cgwalters-agentic-job.yml@main
+    uses: jmarrero-forge/actions/.github/workflows/jmarrero-agentic-job.yml@077c8a5675c88bb3771cba65e77e0672f98c1485 # main, agentic-job v0.6.2 (actions#2)
     permissions:
       contents: read
       issues: write
@@ -73,4 +73,4 @@ jobs:
       config: .github/agentic-job/hosted.toml
       apply-environment: agent-apply
     secrets:
-      SAFE_OUTPUTS_PAT: ${{ secrets.CGWALTERS_BOT_PAT }}
+      SAFE_OUTPUTS_PAT: ${{ secrets.JMARRERO_BOT_PAT }}
