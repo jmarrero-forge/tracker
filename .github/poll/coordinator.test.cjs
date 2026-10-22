@@ -3,8 +3,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const { changedFingerprint, dailyDue, decision, health, loadConfig, pass, record, statusProse, brief, applyConfig } = require('./coordinator.cjs');
+const { changedFingerprint, dailyDue, decision, health, loadConfig, main, pass, record, reportPull, statusProse, brief, applyConfig } = require('./coordinator.cjs');
 
 const now = Date.parse('2026-10-14T11:00:00Z');
 const epic = { number: 7, live: true, title: 'Epic', body: 'Work', priority: 'P1',
@@ -17,12 +19,13 @@ const planBody = (request = 'request1') => '```agent-board-epic-plan\n' + JSON.s
 const statusBody = (prose, request = 'request1') => '```coordinator-status\n' + JSON.stringify({ request, prose }) + '\n```';
 
 test('status JSON has only request and bounded prose, preserved through sanitization', () => {
-  for (const prose of ['a', '😀'.repeat(4000), 'Needs operator.\nNext step.']) {
+  for (const prose of ['a', '😀'.repeat(2000), 'Needs operator.\nNext step.', Array(8).fill('line').join('\r\n')]) {
     assert.equal(statusProse({ body: sanitize(statusBody(prose)) }), prose);
   }
   for (const value of [null, [], {}, { request: 'request1' }, { request: 1, prose: 'OK' },
     { request: '', prose: 'OK' }, { request: 'request1', prose: '' },
-    { request: 'request1', prose: 'a'.repeat(4001) }, { request: 'request1', prose: 1 },
+    { request: 'request1', prose: 'a'.repeat(2001) }, { request: 'request1', prose: 1 },
+    ...['\n', '\r\n', '\r', '\u2028', '\u2029'].map(separator => ({ request: 'request1', prose: Array(9).fill('line').join(separator) })),
     { request: 'request1', prose: 'OK', extra: true }, { request: 'request1', prose: '   ' },
     { request: 'request1', prose: '\n\t' }]) {
     const body = '```coordinator-status\n' + JSON.stringify(value) + '\n```';
@@ -65,6 +68,42 @@ test('daily boundaries include delayed passes and configured UTC hour', () => {
   ]) assert.equal(dailyDue(at, time, hour), due, `${at} ${time} ${hour}`);
 });
 
+test('planning interval tolerates census churn but not new operator decisions', () => {
+  const at = '2026-10-14T11:00:00Z';
+  const state = { applied: changedFingerprint(epic), at, requestedAt: at };
+  const changed = { ...epic, title: 'Changed census' };
+  for (const [value, checkpoint, time, action, reason] of [
+    [changed, state, now + 60000, 'idle', /interval/],
+    [changed, state, now + 3 * 3600000, 'plan', /interval/],
+    [epic, state, now + 3 * 3600000, 'idle', /unchanged/],
+    [changed, { ...state, empty: true }, now + 60000, 'plan', /nothing actionable/],
+    [{ ...changed, comments: [{ ...epic.comments[0], updated_at: '2026-10-14T11:00:01Z' }] }, state, now + 60000, 'plan', /operator/],
+    [epic, state, now + 24 * 3600000, 'plan', /daily/],
+  ]) {
+    const step = decision(value, checkpoint, [], 'bot', time);
+    assert.equal(step.action, action);
+    assert.match(step.reason, reason);
+  }
+  const pending = { id: 'request1', at, fingerprint: changedFingerprint(epic), targets: {} };
+  assert.equal(decision(changed, { pending }, [comment(1, planBody())], 'bot', now).action, 'apply');
+  const operatorEdit = { ...epic, comments: [{ ...epic.comments[0], updated_at: '2026-10-14T11:00:01Z' }] };
+  assert.equal(decision(operatorEdit, { pending }, [comment(1, planBody())], 'bot', now).action, 'stale');
+  // A request recorded before target snapshots re-plans on any drift.
+  const legacy = decision(changed, { pending: { ...pending, targets: undefined } }, [comment(1, planBody())], 'bot', now);
+  assert.deepEqual([legacy.action, legacy.reason], ['stale', 'census changed since legacy request']);
+});
+
+test('planning interval configuration is bounded and defaults to three hours', () => {
+  const source = JSON.parse(fs.readFileSync(require.resolve('./agent-board.json'), 'utf8'));
+  assert.equal(loadConfig(JSON.stringify(source)).minPlanIntervalMs, 3 * 3600000);
+  for (const minutes of [0, -1, 1441, '180', 1.5]) {
+    assert.throws(() => loadConfig(JSON.stringify({ ...source,
+      coordinator: { ...source.coordinator, minPlanIntervalMinutes: minutes } })), /minPlanIntervalMinutes/);
+  }
+  assert.equal(loadConfig(JSON.stringify({ ...source,
+    coordinator: { ...source.coordinator, minPlanIntervalMinutes: 60 } })).minPlanIntervalMs, 3600000);
+});
+
 test('early CLI failures still emit exactly one controller summary', () => {
   const run = spawnSync(process.execPath, [require.resolve('./coordinator.cjs')], { env: {}, encoding: 'utf8' });
   assert.equal(run.status, 1);
@@ -89,7 +128,7 @@ test('plan, later apply, daily refresh, stale result and authenticated comments'
     [{ pending }, [comment(1, plan)], 'apply'],
     [{ pending }, [comment(1, plan.replace('request1', 'obsolete'))], 'wait'],
     [{ pending }, [comment(1, plan), comment(2, plan.replace('request1', 'obsolete'))], 'wait'],
-    [{ pending: { ...pending, fingerprint: 'old' } }, [comment(1, plan)], 'stale'],
+    [{ pending: { ...pending, fingerprint: 'old', targets: {} } }, [comment(1, plan)], 'apply'],
   ]) assert.equal(decision(epic, state, comments, 'bot', now).action, action);
   assert.equal(record([comment(1, '<!-- coordinator/v1: {"applied":"fake"} -->\n', 'visitor')], 'bot').id, null);
   assert.throws(() => statusProse({ body: '```coordinator-status\n\n```' }));
@@ -204,15 +243,17 @@ test('health reports blocked, absent and unread board facts', () => {
 test('coordinator pools default independently and reject unknown pool names', () => {
   const source = JSON.parse(fs.readFileSync(require.resolve('./agent-board.json'), 'utf8'));
   assert.equal(loadConfig(JSON.stringify(source)).planPool, 'claude');
-  assert.equal(loadConfig(JSON.stringify(source)).statusPool, 'claude');
-  // The defaults are planning on claude and the status on mistral, a pool
-  // pools.json here does not have, so ours names its status pool.
+  assert.equal(loadConfig(JSON.stringify(source)).statusPool, 'openai');
   delete source.coordinator.planPool;
-  assert.equal(loadConfig(JSON.stringify(source)).planPool, 'claude');
-  const { statusPool, ...noStatusPool } = source.coordinator;
-  assert.throws(() => loadConfig(JSON.stringify({ ...source, coordinator: noStatusPool })), /coordinator.statusPool/);
+  delete source.coordinator.statusPool;
+  const defaults = loadConfig(JSON.stringify(source));
+  assert.equal(defaults.planPool, 'claude');
+  assert.equal(defaults.statusPool, 'mistral');
+  // A tier is its automatic pools, the first until a pass chooses by pace.
+  const tiered = loadConfig(JSON.stringify({ ...source, coordinator: { ...source.coordinator, planPool: 'tier-1' } }));
+  assert.deepEqual([tiered.planPools, tiered.planPool], [['claude', 'openai'], 'claude']);
   for (const name of ['planPool', 'statusPool']) {
-    for (const value of ['', 'unknown', 'toString', null, 1]) {
+    for (const value of ['', 'unknown', 'toString', null, 1, 'tier-3']) {
       assert.throws(() => loadConfig(JSON.stringify({ ...source,
         coordinator: { ...source.coordinator, [name]: value } })), new RegExp(`coordinator.${name}`));
     }
@@ -221,17 +262,17 @@ test('coordinator pools default independently and reject unknown pool names', ()
 
 test('planning and status dispatch use their own configured pools', async () => {
   const source = JSON.parse(fs.readFileSync(require.resolve('./agent-board.json'), 'utf8'));
-  // pools.json here has claude alone, so the configured pools are the
-  // ones the runs get, as each of them.
-  const config = loadConfig(JSON.stringify(source));
-  const h = harness(true);
-  Object.assign(h.options.config, { planPool: config.planPool, statusPool: config.statusPool });
-  assert.equal((await pass(h.options)).errors, 0);
-  assert.equal(h.dispatches.length, 2);
-  assert.equal(h.dispatches[0].inputs.item, '99');
-  assert.equal(h.dispatches[0].inputs.pool, source.coordinator.statusPool);
-  assert.equal(h.dispatches[1].inputs.item, '7');
-  assert.equal(h.dispatches[1].inputs.pool, source.coordinator.planPool);
+  for (const overrides of [{}, { planPool: 'openai', statusPool: 'claude' }]) {
+    const config = loadConfig(JSON.stringify({ ...source, coordinator: { ...source.coordinator, ...overrides } }));
+    const h = harness(true);
+    Object.assign(h.options.config, { planPool: config.planPool, statusPool: config.statusPool });
+    assert.equal((await pass(h.options)).errors, 0);
+    assert.equal(h.dispatches.length, 2);
+    assert.equal(h.dispatches[0].inputs.item, '99');
+    assert.equal(h.dispatches[0].inputs.pool, overrides.statusPool ?? 'openai');
+    assert.equal(h.dispatches[1].inputs.item, '7');
+    assert.equal(h.dispatches[1].inputs.pool, overrides.planPool ?? 'claude');
+  }
 });
 
 test('long comment history packs newest decisions first within the UTF-8 dispatch limit', () => {
@@ -296,6 +337,7 @@ function harness(apply = false, entries = [epic, { ...epic, number: 9 }], commen
   const config = { epicsRepository: 'o/r', planner: 'bot', operator: 'op', caller: 'o/controller', owner: 'o', project: 1, priorityField: 'Priority', workflow: 'dispatch.yml',
     followed: new Set(['o/r']), wip: 4, planPool: 'claude', statusPool: 'mistral', statusIssue: 99, statusHourUTC: 11, usage: { repo: 'o/usage', issue: 1, bot: 'bot' } };
   return { writes, dispatches, commands, lines, options: { config, entries, note: '', now, apply,
+    refresh: async () => ({ entries, note: '' }),
     get: async (method, p, body) => { if (method !== 'GET') { writes.push({ method, p, body }); return { id: writes.length }; }
       return p === '/repos/o/controller' ? { default_branch: 'trunk' } : []; },
     post: async ({ variables }) => variables.field ? project() : ({ data: { repository: { issue: { comments: {
@@ -327,6 +369,117 @@ test('preview performs no writes; apply checkpoints before dispatch and plans at
   assert.equal(live.dispatches[1].inputs.item, '7');
 });
 
+test('an approved plan loses needs-human as it is planned, before its claim; a preview only says so', async () => {
+  const approved = { ...epic, approved: true };
+  const preview = harness(false, [approved]);
+  assert.equal((await pass(preview.options)).plan, 1);
+  assert.deepEqual(preview.writes, []);
+  assert.ok(preview.lines.includes('o/r#7 approved: would remove needs-human'));
+  const live = harness(true, [approved]);
+  assert.equal((await pass(live.options)).errors, 0);
+  const epicWrites = live.writes.filter(w => !w.p.includes('/99/'));
+  assert.deepEqual(epicWrites.map(w => [w.method, w.p]), [['DELETE', '/repos/o/r/issues/7/labels/needs-human'], ['POST', '/repos/o/r/issues/7/comments']]);
+  assert.equal(live.dispatches.at(-1).inputs.item, '7');
+  assert.match(live.dispatches.at(-1).inputs.task, /first sub-issue delivers that contract/);
+  assert.doesNotMatch(brief({ epicsRepository: 'o/r', followed: new Set(), operator: 'op' }, epic, 'id', { priorities: ['P1'] }), /contract/);
+  // Already removed (404) still plans; any other failure stops before the claim.
+  for (const [status, planned] of [[404, true], [403, false]]) {
+    const h = harness(true, [approved]);
+    const get = h.options.get;
+    h.options.get = async (method, p, body) => {
+      if (method === 'DELETE') throw new Error(`DELETE ${p}: HTTP ${status} no`);
+      return get(method, p, body);
+    };
+    const counts = await pass(h.options);
+    assert.equal(counts.errors, planned ? 0 : 1);
+    assert.equal(h.writes.some(w => w.p === '/repos/o/r/issues/7/comments'), planned);
+  }
+  // Not approved (or not live: the census leaves a plan under review out): no label is touched.
+  const plain = harness(true, [epic, { number: 4, live: false, why: 'unlabelled by op' }]);
+  await pass(plain.options);
+  assert.ok(!plain.writes.some(w => w.method === 'DELETE'));
+  // A waiting epic is not planned this pass, so it keeps the label until it is.
+  const full = harness(true, [approved]);
+  full.options.config.wip = 0;
+  await pass(full.options);
+  assert.ok(!full.writes.some(w => w.method === 'DELETE'));
+});
+
+test('status brief points to Decisions without sampled asks and supplies linked activity and stale usage', async () => {
+  for (const age of [0, 3 * 3600000, 3 * 3600000 + 1, null]) {
+    const h = harness(true, [{ ...epic, subs: [{ ...epic.subs[0], status: 'Blocked' }] }, { ...epic, live: false, number: 10 }]);
+    h.options.config.reviewUrl = 'https://review.example.test/#';
+    const get = h.options.get;
+    h.options.get = async (method, p, body) => {
+      assert.equal(p.startsWith('/search/'), false, 'no decision count');
+      assert.equal(p.includes('labels='), false, 'no sampled operator asks');
+      if (p.includes('/pulls?state=all')) return [{ number: 2, html_url: 'https://github.com/o/r/pull/2',
+        body: 'Refs O/R#8', merged_at: '2026-10-14T10:30:00Z', state: 'closed' }];
+      return get(method, p, body);
+    };
+    const post = h.options.post;
+    h.options.post = async args => !args.variables.field && args.variables.number === 1 ? { data: { repository: { issue: { comments: {
+      nodes: age === null ? [] : [comment(12, '<!-- bot-usage v1 -->\n```json\n' + JSON.stringify({ schema: 'bot-usage/v1', updated_at: new Date(now - age).toISOString() }) + '\n```')],
+      pageInfo: { hasNextPage: false } } } } } } : post(args);
+    assert.equal((await pass(h.options)).errors, 0, h.lines.join('\n'));
+    const task = h.dispatches[0].inputs.task;
+    assert.match(task, /Write only from these facts; do not read the repository\./);
+    assert.match(task, /at most 8 lines/);
+    assert.match(task, /"\[Decisions\]\(URL\)" using decisions.url, with no count/);
+    assert.match(task, /at least two related failed runs/);
+    const facts = JSON.parse(task.split('\n\n')[1]);
+    assert.deepEqual(facts.decisions, { url: 'https://review.example.test/#' });
+    assert.equal(facts.epics.length, 1);
+    assert.deepEqual(facts.epics[0].blocked, ['https://github.com/O/R/issues/8']);
+    assert.equal(facts.pulls[0].pulls[0].url, 'https://github.com/o/r/pull/2');
+    assert.deepEqual(facts.pulls[0].pulls[0].epics, [7, 10]);
+    assert.equal(facts.usage.stale, age === null || age > 3 * 3600000);
+    assert.equal(facts.usage.url, 'https://github.com/o/usage/issues/1');
+    assert.equal(Object.hasOwn(facts, 'operatorAsks'), false);
+  }
+});
+
+test('large and partial censuses retain epic coverage within a recorded line budget', async () => {
+  const entries = Array.from({ length: 7 }, (_, i) => ({ ...epic, number: i + 1 }));
+  entries.push({ number: 20, error: 'timeline unavailable' });
+  const h = harness(true, entries);
+  await pass(h.options);
+  const task = h.dispatches[0].inputs.task;
+  assert.match(task, /at most 11 lines/);
+  assert.match(task, /explicitly say unavailable for unread epics/);
+  const facts = JSON.parse(task.split('\n\n')[1]);
+  assert.equal(facts.epics.length, 8);
+  assert.equal(facts.epics.at(-1).unread, true);
+  const state = checkpointState(h.writes[0]);
+  assert.equal(state.pending.maxLines, 11);
+  const prose = Array(11).fill('line').join('\n');
+  assert.equal(statusProse({ body: statusBody(prose) }, state.pending.maxLines), prose);
+  assert.throws(() => statusProse({ body: statusBody(prose) }));
+  assert.throws(() => statusProse({ body: statusBody('\n'.repeat(20) + 'OK') }));
+  // A pending run recorded before line budgets keeps its 4000-character brief.
+  assert.equal(statusProse({ body: statusBody('a\n'.repeat(1999) + 'b') }, null), 'a\n'.repeat(1999) + 'b');
+  assert.throws(() => statusProse({ body: statusBody('a'.repeat(4001)) }, null));
+});
+
+test('maximum census status matches and publishes with expanded prose bounds', async () => {
+  const entries = Array.from({ length: 50 }, (_, i) => ({ ...epic, number: i + 1 }));
+  const first = harness(true, entries);
+  assert.equal((await pass(first.options)).errors, 0);
+  assert.match(first.dispatches[0].inputs.task, /1 to 15500 characters and at most 53 lines/);
+  const checkpoint = comment(10, first.writes[0].body.body);
+  const prose = ['[Decisions](https://review.example.test/)',
+    ...entries.map(e => `[Epic ${e.number}](https://github.com/o/r/issues/${e.number}) on-track; merged none observed; blocked none observed.`),
+    '[Pool usage](https://github.com/o/usage/issues/1): unavailable, stale.'].join('\n');
+  assert.ok(prose.length > 2000);
+  assert.throws(() => statusProse({ body: statusBody(prose) }));
+  const later = harness(true, entries, [checkpoint, comment(11, resultBody(prose, checkpoint))]);
+  let published;
+  later.options.writeFile = (name, body) => { published = body; return '/tmp/status.md'; };
+  assert.equal((await pass(later.options)).status, 1);
+  assert.equal(published, prose);
+  assert.equal(later.commands.length, 1);
+});
+
 test('incomplete census never plans an epic, and dispatch failure retains its claim', async () => {
   const unread = harness(false, [{ number: 7, error: 'unread' }]);
   const counts = await pass(unread.options);
@@ -334,9 +487,51 @@ test('incomplete census never plans an epic, and dispatch failure retains its cl
   assert.equal(counts.errors, 1);
   const failed = harness(true);
   failed.options.dispatch = async method => { if (method === 'GET') return { workflow_runs: [] }; throw new Error('ambiguous write'); };
-  assert.equal((await pass(failed.options)).errors, 2);
-  assert.equal(failed.writes.length, 2);
+  assert.equal((await pass(failed.options)).errors, 3);
+  assert.equal(failed.writes.length, 3);
   assert.match(failed.writes[0].body.body, /pending/);
+});
+
+test('a dispatch GitHub refused takes its claim back, so the next pass plans again', async () => {
+  const state = body => JSON.parse(/: (\{.*\}) -->/.exec(body)[1]);
+  const refused = harness(true);
+  refused.options.dispatch = async (method, p) => {
+    if (method === 'GET') return { workflow_runs: [] };
+    throw new Error(`POST ${p}: HTTP 403 {"message":"You have exceeded a secondary rate limit"}`);
+  };
+  assert.equal((await pass(refused.options)).errors, 3);
+  // Status issue, then epics 7 and 9: each claim, then its take-back.
+  assert.equal(refused.writes.length, 6);
+  for (const [i, number] of [99, 7, 9].entries()) {
+    const [claim, back] = refused.writes.slice(2 * i, 2 * i + 2);
+    assert.equal(claim.p, `/repos/o/r/issues/${number}/comments`);
+    assert.ok(state(claim.body.body).pending);
+    assert.equal(back.method, 'PATCH');
+    assert.equal(back.p, `/repos/o/r/issues/comments/${2 * i + 1}`);
+    assert.deepEqual(state(back.body.body), { pending: null });
+  }
+  // The restored checkpoint is the one before the claim: no failure counted,
+  // no request time that would hold the next plan back.
+  assert.equal(decision(epic, state(refused.writes[3].body.body), [], 'bot', now + 3600000).action, 'plan');
+
+  // A rejected `return_run_details` is retried without it; a refusal of the
+  // retry takes the claim back as well.
+  const retried = harness(true, [epic]);
+  retried.options.dispatch = async (method, p, body) => {
+    if (method === 'GET') return { workflow_runs: [] };
+    throw new Error(`POST ${p}: HTTP ${body.return_run_details ? 422 : 403} refused`);
+  };
+  await pass(retried.options);
+  assert.equal(retried.writes.filter(w => w.method === 'PATCH').length, 2);
+
+  // A server error is ambiguous: the run may have started, so the claim stays.
+  const ambiguous = harness(true, [epic]);
+  ambiguous.options.dispatch = async (method, p) => {
+    if (method === 'GET') return { workflow_runs: [] };
+    throw new Error(`POST ${p}: HTTP 502 bad gateway`);
+  };
+  await pass(ambiguous.options);
+  assert.equal(ambiguous.writes.filter(w => w.method === 'PATCH').length, 0);
 });
 
 test('large epic dispatch succeeds and includes only configured bot-linked open PR facts', async () => {
@@ -444,11 +639,81 @@ test('later epic apply pins the matched plan in preview and apply', async () => 
     assert.equal(h.commands[0].at(-1), '--dry-run');
     for (const args of h.commands) assert.deepEqual(args.slice(5, -1), [
       '--expect-request', 'request1', '--expect-comment', '11', '--expect-updated-at', plan.updatedAt]);
-    assert.equal(h.writes.length, apply ? 1 : 0);
+    assert.equal(h.writes.length, apply ? 2 : 0);
     if (apply) {
       assert.equal(h.commands[1].at(-1), '--apply');
-      assert.deepEqual(checkpointState(h.writes[0]), { applied: changedFingerprint(value), at: new Date(now).toISOString(), pending: null });
+      assert.deepEqual(checkpointState(h.writes.at(-1)), { applied: changedFingerprint(value), at: new Date(now).toISOString(),
+        requestedAt: '2026-10-14T10:00:00Z', pending: null, empty: true });
     }
+  }
+});
+
+test('post-apply census records own effects and target changes remain guarded', async () => {
+  const h = refusalHarness(true, null);
+  const updated = { ...epic, title: 'Post apply', subs: [{ ...epic.subs[0], priority: 'P2' }] };
+  let refreshes = 0;
+  h.options.refresh = async () => { refreshes++; return { entries: [updated], note: '' }; };
+  assert.equal((await pass(h.options)).apply, 1);
+  assert.equal(refreshes, 1);
+  const saved = checkpointState(h.writes.at(-1));
+  assert.equal(saved.applied, changedFingerprint(updated));
+  assert.equal(decision(updated, saved, [], 'bot', now + 60000).action, 'idle');
+  const pending = { id: 'request1', at: '2026-10-14T10:00:00Z', fingerprint: changedFingerprint(epic), targets: { 'o/r#8': 'old' } };
+  const body = '```agent-board-epic-plan\n' + JSON.stringify({ request: 'request1', actions: [
+    { type: 'rescope_sub_issue', issue: 'O/R#8', body: 'New', reason: 'Change' }] }) + '\n```';
+  for (const state of ['open', 'closed']) {
+    assert.equal(decision({ ...epic, subs: [{ ...epic.subs[0], state }] }, { pending }, [comment(1, body)], 'bot', now).action, 'blocked');
+  }
+});
+
+test('an epic left with no open children is planned again once, not on every pass', async () => {
+  const value = { ...epic, subs: [] };
+  const first = refusalHarness(true, null);
+  await pass(first.options);
+  const empty = checkpointState(first.writes.at(-1));
+  assert.equal(empty.empty, true);
+  assert.equal(decision(value, empty, [], 'bot', now + 60000).action, 'plan');
+  // The retry request records that it is one.
+  const retry = harness(true, [value]);
+  retry.options.post = async ({ variables }) => variables.field ? project() : { data: { repository: { issue: { comments: {
+    nodes: variables.number === 7 ? [comment(10, first.writes.at(-1).body.body)] : [], pageInfo: { hasNextPage: false } } } } } };
+  await pass(retry.options);
+  assert.equal(checkpointState(retry.writes.at(-1)).emptyRetry, true);
+  // Its apply, empty again, leaves the epic to the interval and daily pass.
+  const second = refusalHarness(true, null, { emptyRetry: true });
+  await pass(second.options);
+  const settled = checkpointState(second.writes.at(-1));
+  assert.equal(settled.empty, false);
+  assert.equal(decision(value, settled, [], 'bot', now + 60000).action, 'idle');
+});
+
+test('confirmed apply reconciles after a transient census failure without reapplying', async () => {
+  const h = refusalHarness(true, null);
+  h.options.refresh = async () => { throw new Error('temporary census failure'); };
+  assert.equal((await pass(h.options)).errors, 1);
+  const savedWrite = h.writes.find(w => w.p.endsWith('/comments/10'));
+  const saved = checkpointState(savedWrite);
+  assert.equal(saved.reconcile, true);
+  assert.equal(saved.pending, null);
+  const retry = harness(true, [epic]);
+  retry.options.config.wip = 0;
+  retry.options.post = async ({ variables }) => ({ data: { repository: { issue: { comments: {
+    nodes: variables.number === 7 ? [comment(10, savedWrite.body.body)] : [], pageInfo: { hasNextPage: false }
+  } } } } });
+  assert.equal((await pass(retry.options)).errors, 0);
+  assert.equal(retry.commands.length, 0);
+  assert.equal(checkpointState(retry.writes.at(-1)).applied, changedFingerprint(epic));
+});
+
+test('epic intent changes block create-only plans even without existing targets', async () => {
+  const h = harness(true, [epic]);
+  assert.equal((await pass(h.options)).errors, 0);
+  const state = checkpointState(h.writes.find(w => w.p.endsWith('/7/comments')));
+  const body = '```agent-board-epic-plan\n' + JSON.stringify({ schema: 'agent-board/epic-plan/v1',
+    request: state.pending.id, epic: 'O/R#7', actions: [{ type: 'create_sub_issue', repo: 'O/R', title: 'Old requirements', body: 'Work' }] }) + '\n```';
+  const plan = comment(20, body);
+  for (const field of ['title', 'body']) {
+    assert.equal(decision({ ...epic, [field]: 'Withdrawn' }, state, [plan], 'bot', now).action, 'blocked');
   }
 });
 
@@ -497,7 +762,7 @@ test('a plan agent-board refuses fails that epic only, counts, and is quoted in 
       // The pass carried on: epic 9 was planned after 7's refusal.
       assert.equal(h.dispatches.filter(d => d.inputs.item === '9').length, apply ? 1 : 0);
       assert.ok(h.lines.some(l => l.startsWith('o/r#7 failed: agent-board refused the plan: newest epic plan')));
-      const saved = h.writes.find(w => w.p === '/repos/o/r/issues/comments/10');
+      const saved = h.writes.findLast(w => w.p === '/repos/o/r/issues/comments/10');
       if (!apply) { assert.equal(saved, undefined); continue; }
       assert.doesNotMatch(saved.body.body.split('\n')[0].slice(4, -4), /-->|<!--/);
       const { state } = record([comment(10, saved.body.body)], 'bot');
@@ -538,7 +803,7 @@ test('agent-board failures that are not a refused plan leave it pending and unco
       const counts = await pass(h.options);
       assert.deepEqual([counts.failed, counts.errors], [0, 1], JSON.stringify(stderr));
       assert.equal(h.writes.some(w => w.p === '/repos/o/r/issues/comments/10'), false);
-      assert.equal(h.dispatches.some(d => d.inputs.item === '9'), false);
+       assert.equal(h.dispatches.some(d => d.inputs.item === '9'), apply);
     }
   }
   // A valid plan previews and applies successfully.
@@ -564,7 +829,7 @@ test('plan changes, refusals and transient failures at either CLI boundary', asy
       };
       const counts = await pass(h.options);
       assert.deepEqual([counts.apply, counts.failed, counts.errors, counts.wait], expected, `${boundary}: ${status}: ${stderr}`);
-      const saved = h.writes.find(w => w.p === '/repos/o/r/issues/comments/10');
+      const saved = h.writes.findLast(w => w.p === '/repos/o/r/issues/comments/10');
       if (status === 3 || counts.errors) assert.equal(saved, undefined, 'pending and failures unchanged');
       else if (counts.failed) assert.deepEqual([checkpointState(saved).pending, checkpointState(saved).failures], [null, 2]);
       else assert.equal(checkpointState(saved).applied, changedFingerprint(h.options.entries[0]));
@@ -588,6 +853,94 @@ test('a retained claim after ambiguous apply does not checkpoint success on retr
     assert.equal(h.writes.some(w => w.p === '/repos/o/r/issues/comments/10'), false);
   }
   assert.ok(h.lines.some(l => l.includes('inspect agent-board claim')));
+});
+
+test('claimed plans recover only when all effects are present; partial failures let the next epic plan', async () => {
+  const actions = [
+    { type: 'create_sub_issue', repo: 'O/R', title: 'Created', body: 'Work' },
+    { type: 'set_priority', new: 1, value: 'P1' },
+    { type: 'close_sub_issue', issue: 'o/r#8', reason: 'Done' },
+    { type: 'rescope_sub_issue', issue: 'o/r#10', body: 'Revised', reason: 'Change' },
+  ];
+  const complete = [{ ...epic.subs[0], number: 12, title: 'Created', body: 'Work' },
+    { ...epic.subs[0], state: 'closed' }, { ...epic.subs[0], number: 10, body: 'Revised' }];
+  for (const [subs, missing] of [
+    [complete, null], [complete.slice(1), /action 1.*action 2/],
+    [[{ ...complete[0], body: 'Wrong' }, ...complete.slice(1)], /action 1/],
+    [[{ ...complete[0], priority: 'P2' }, ...complete.slice(1)], /action 1.*action 2/],
+    [[{ ...complete[0], onBoard: false }, ...complete.slice(1)], /action 1.*action 2/],
+    [[complete[0], { ...complete[1], state: 'open' }, complete[2]], /action 3/],
+    [[complete[0], complete[1], { ...complete[2], body: 'Old' }], /action 4/],
+    [[...complete, { ...complete[0], number: 13 }], /action 1/],
+  ]) {
+    const h = refusalHarness(true, null);
+    const post = h.options.post;
+    h.options.post = async args => {
+      const out = await post(args);
+      if (args.variables.number === 7) out.data.repository.issue.comments.nodes[1] = comment(11,
+        '```agent-board-epic-plan\n' + JSON.stringify({ request: 'request1', actions }) + '\n```');
+      return out;
+    };
+    h.options.refresh = async () => ({ entries: [{ ...epic, subs }], note: '' });
+    h.options.board = args => args.includes('--apply') ? { stdout: 'Already claimed; nothing changed.\n' } : { stdout: '' };
+    const counts = await pass(h.options);
+    assert.equal(counts.errors, missing ? 1 : 0, h.lines.join('\n'));
+    const saved = h.writes.filter(w => w.p.endsWith('/comments/10'));
+    if (missing) {
+      assert.equal(saved.length, 0);
+      assert.match(h.lines.join('\n'), missing);
+      assert.ok(h.dispatches.some(d => d.inputs.item === '9'));
+    } else {
+      assert.equal(counts.apply, 1);
+      assert.deepEqual([checkpointState(saved[0]).pending, checkpointState(saved[0]).reconcile], [null, true]);
+      assert.match(h.lines.join('\n'), /recovered: claimed plan effects confirmed/);
+    }
+  }
+});
+
+test('ambiguous epic dispatches and lost receipt checkpoints reserve their WIP slot', async () => {
+  for (const receipt of [false, true]) {
+    const h = harness(true, [epic, { ...epic, number: 9 }]);
+    h.options.config.wip = 1;
+    const post = h.options.post;
+    h.options.post = async args => args.variables.number === 99 ? { data: { repository: { issue: { comments: {
+      nodes: [comment(1, '<!-- coordinator-status/v1: {"failures":3} -->\ncheckpoint')], pageInfo: { hasNextPage: false } } } } } } : post(args);
+    h.options.dispatch = async (method, p, body) => {
+      if (method === 'GET') return { workflow_runs: [] };
+      h.dispatches.push(body);
+      if (receipt) return { workflow_run_id: 42 };
+      throw new Error('lost receipt');
+    };
+    const get = h.options.get;
+    h.options.get = async (method, p, body) => {
+      if (method === 'PATCH') throw new Error('lost checkpoint');
+      return get(method, p, body);
+    };
+    const counts = await pass(h.options);
+    assert.equal(counts.errors, 1);
+    assert.equal(h.dispatches.length, 1);
+    assert.ok(h.lines.some(l => l.includes('#9 skipped: planning capacity full')));
+  }
+});
+
+test("the scheduler's runs of this job count against the cap, once, before the runs list shows them", async () => {
+  const full = harness(true);
+  full.options.config.wip = 2;
+  full.options.dispatched = ['o/x#1', 'o/x#2'];
+  await pass(full.options);
+  assert.deepEqual(full.dispatches, []);
+  assert.ok(full.lines.some(l => l.includes('planning capacity full')), full.lines.join('\n'));
+
+  // One the list shows already is not counted twice: a slot is left.
+  const listed = harness(true);
+  listed.options.config.wip = 2;
+  listed.options.dispatched = ['o/x#1'];
+  listed.options.dispatch = async (method, p, body) => {
+    if (method === 'GET') return { workflow_runs: [{ status: 'in_progress', display_title: 'implement o/x#1 (claude)', html_url: 'https://example.test/run' }] };
+    listed.dispatches.push(body);
+  };
+  await pass(listed.options);
+  assert.equal(listed.dispatches.length, 1);
 });
 
 test('ordinary reporting volume is bounded and reporting failures do not block epic planning', async () => {
@@ -766,7 +1119,58 @@ test('a deleted run counts as finished, and a settled checkpoint is not looked u
     assert.deepEqual([counts.failed, counts.errors], [failed, errors]);
   }
   const stale = retryHarness({ pending: { ...pending, fingerprint: 'old intent' } }, status, finished);
+  stale.options.entries = [{ ...epic, comments: [{ ...epic.comments[0], updated_at: new Date(now).toISOString() }] }];
   await pass(stale.options);
   assert.deepEqual(stale.lookups, []);
   assert.equal(checkpointState(stale.writes.find(w => w.p.endsWith('/comments/10'))).pending, null);
+});
+
+test("a batched pull request is reported once, with its issues; others' issues are not listed", () => {
+  const entries = [{ number: 7, subs: [{ repository: 'O/R', number: 9 }] }];
+  const body = 'Refs o/r#8\n\nCloses #8\nCloses #9';
+  const pull = { number: 3, html_url: 'https://github.com/o/r/pull/3', user: { login: 'Bot' }, body };
+  const report = reportPull(pull, entries, 'bot');
+  assert.deepEqual(report.issues, ['https://github.com/o/r/issues/8', 'https://github.com/o/r/issues/9']);
+  assert.deepEqual(report.epics, [7]);
+  const visitor = reportPull({ ...pull, user: { login: 'visitor' } }, entries, 'bot');
+  assert.deepEqual(visitor.issues, []);
+  assert.deepEqual(visitor.epics, [7]);
+});
+
+test('an applying pass during a broker outage previews: no record, no dispatch', async () => {
+  const run = async outage => {
+    const calls = [];
+    const lines = [];
+    const saved = { fetch: globalThis.fetch, log: console.log, env: { ...process.env } };
+    globalThis.fetch = async (u, init) => {
+      const p = u.replace('https://api.github.com', '');
+      calls.push(`${init?.method ?? 'GET'} ${p}`);
+      const reply = body => new Response(JSON.stringify(body), { status: 200 });
+      if (p === '/repos/configured/tracker/issues?state=open&labels=outage&per_page=100') return reply(outage);
+      if (p.includes('/runs?')) return reply({ workflow_runs: [] });
+      if (p === '/graphql') return reply({ data: { repository: { issue: { comments: { nodes: [], pageInfo: { hasNextPage: false } } } } } });
+      if (init?.method === 'POST') return reply({ id: 1, body: '', html_url: 'https://github.com/c' });
+      return reply([]);
+    };
+    console.log = line => lines.push(line);
+    Object.assign(process.env, { GH_TOKEN: 'test-token', AGENT_BOARD: '/nonexistent', RUNNER_TEMP: os.tmpdir(), GITHUB_REPOSITORY: 'configured/tracker' });
+    delete process.env.GITHUB_STEP_SUMMARY;
+    try {
+      await main(['--apply']);
+    } finally {
+      globalThis.fetch = saved.fetch;
+      console.log = saved.log;
+      for (const k of Object.keys(process.env)) if (!(k in saved.env)) delete process.env[k];
+      Object.assign(process.env, saved.env);
+    }
+    return { writes: calls.filter(c => !c.startsWith('GET ') && c !== 'POST /graphql'), lines };
+  };
+  // Unheld, the daily status is due: a record, then its run.
+  const { bot } = JSON.parse(fs.readFileSync(path.join(__dirname, 'agent-board.json'), 'utf8'));
+  assert.ok((await run([])).writes.some(c => c.endsWith('/dispatches')));
+  const held = await run([{ number: 9, html_url: 'https://github.com/configured/tracker/issues/9', user: { login: bot },
+    body: '<!-- tracker-broker-outage -->\nBroker unreachable', updated_at: new Date().toISOString() }]);
+  assert.deepEqual(held.writes, []);
+  assert.equal(held.lines.filter(l => l.startsWith('held:')).join('\n'), 'held: broker outage https://github.com/configured/tracker/issues/9');
+  assert.match(held.lines.at(-1), /^coordinator\/v1 \{"mode":"preview",/);
 });

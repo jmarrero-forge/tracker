@@ -4,8 +4,12 @@
 'use strict';
 
 const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const settings = require('./agent-board.json');
+const { readDecisions } = require('./decisions.cjs');
+const { heldBy } = require('./broker.cjs');
 
 const CONFIG = Object.freeze({
   author: settings.bot,
@@ -17,18 +21,30 @@ const CONFIG = Object.freeze({
 
 const poolForKind = kind => Object.hasOwn(CONFIG.kindPools, kind) ? CONFIG.kindPools[kind] : '';
 
-async function request(token, method, path, body) {
-  const res = await fetch('https://api.github.com' + path, {
-    method,
-    headers: {
-      authorization: `Bearer ${token}`,
-      accept: 'application/vnd.github+json',
-      'x-github-api-version': '2022-11-28',
-      'user-agent': 'tracker-poll',
-    },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  const text = await res.text();
+// fetch never times out by itself: a connection GitHub accepts and never
+// answers would hold the pass until the step's timeout-minutes kills it, past
+// every caller's handling of a failed request (#819). GitHub answers these
+// calls in well under this; the signal covers reading the body too.
+const REQUEST_TIMEOUT_MS = 30e3;
+
+async function request(token, method, path, body, timeoutMs = REQUEST_TIMEOUT_MS) {
+  let res, text;
+  try {
+    res = await fetch('https://api.github.com' + path, {
+      method,
+      headers: {
+        authorization: `Bearer ${token}`,
+        accept: 'application/vnd.github+json',
+        'x-github-api-version': '2022-11-28',
+        'user-agent': 'tracker-poll',
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    text = await res.text();
+  } catch (err) {
+    throw new Error(`${method} ${path}: ${err.cause?.message || err.message}`);
+  }
   if (!res.ok) throw new Error(`${method} ${path}: HTTP ${res.status} ${text.slice(0, 300)}`);
   return text ? JSON.parse(text) : null;
 }
@@ -42,30 +58,59 @@ async function paged(token, path) {
   }
 }
 
-function poll(argv, env = process.env, run = spawnSync) {
+async function poll(argv, env = process.env, run = spawnSync, api = request) {
   if (argv.some(a => a !== '--apply' && a !== '--dry-run') || argv.length > 1) {
     throw new Error('usage: poll.cjs [--dry-run | --apply]');
   }
-  const mode = argv[0] ?? '--dry-run';
+  let mode = argv[0] ?? '--dry-run';
   if (!env.AGENT_BOARD || !env.POLL_STATE) throw new Error('AGENT_BOARD and POLL_STATE are required');
+  let state = env.POLL_STATE;
+  let notes = '';
+  let held = null;
+  if (mode === '--apply') {
+    // While the broker is out every fix run it starts fails and spends a
+    // round (#603), so a held pass only previews, merges included. Its
+    // preview runs on a copy, so the saved apply state is not advanced.
+    try {
+      held = await heldBy({ token: env.GH_TOKEN, repo: env.GITHUB_REPOSITORY, login: CONFIG.author, api,
+        log: line => { notes += `${line}\n`; } });
+    } catch (err) {
+      return { stdout: notes, stderr: `poll: outage issue not readable: ${err.message}\n`, again: true, status: 1 };
+    }
+    if (held) {
+      notes += `held: broker outage ${held.url}; this pass previews only\n`;
+      mode = '--dry-run';
+      state = path.join(fs.mkdtempSync(path.join(env.RUNNER_TEMP || os.tmpdir(), 'poll-held-')), 'poll-state.json');
+      if (fs.existsSync(env.POLL_STATE)) fs.copyFileSync(env.POLL_STATE, state);
+    }
+  }
   // A hung child or oversized PR-derived output must not exhaust the runner
   // or prevent it from scheduling the next pass.
   const result = run(env.AGENT_BOARD, [
-    'poll', mode, '--config', '.github/poll/agent-board.json', '--state', env.POLL_STATE,
+    'poll', mode, '--config', '.github/poll/agent-board.json', '--state', state,
   ], { env, encoding: 'utf8', timeout: 300_000, maxBuffer: 4 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
-  const stdout = result.stdout ?? '';
+  const stdout = notes + (result.stdout ?? '');
   const stderr = result.stderr ?? '';
   const due = [...stdout.matchAll(/^next-due-seconds=(\d+)$/gm)].at(-1)?.[1];
   // Titles and bodies are untrusted. Only the final, bounded numeric interval
   // is consumed, never an arbitrary output line or a command from the child.
   const valid = due !== undefined && Number(due) >= 300 && Number(due) <= 21600;
   const failed = Boolean(result.error || result.status !== 0 || !valid);
-  const again = failed || Number(due) === 300;
+  // A held pass does not restart the chain: the schedule brings the next.
+  const again = !held && (failed || Number(due) === 300);
   return { stdout, stderr, again, status: failed ? 1 : 0 };
 }
 
-function main(argv) {
-  const result = poll(argv);
+// An unreadable decisions issue (a rate limit, lost access) is a skipped read,
+// reported in its line, not a failed pass: failing would drop the pass's own
+// state and start a pass every 5 minutes until the read came back. The next
+// pass reads it again on the restored baseline, which a failed read leaves.
+function withDecisions(result, decisions) {
+  return { ...result, stdout: `${result.stdout}decisions/v1 ${JSON.stringify(decisions)}\n` };
+}
+
+async function main(argv) {
+  const result = withDecisions(await poll(argv), readDecisions(process.env, settings));
   process.stdout.write(result.stdout);
   process.stderr.write(result.stderr);
   if (result.status) console.error('poll: agent-board failed or did not return a valid interval');
@@ -77,8 +122,8 @@ function main(argv) {
   process.exitCode = result.status;
 }
 
-module.exports = { CONFIG, paged, poolForKind, request, poll };
+module.exports = { CONFIG, paged, poolForKind, request, poll, withDecisions };
 
 if (require.main === module) {
-  try { main(process.argv.slice(2)); } catch (err) { console.error(`poll: ${err.message}`); process.exitCode = 1; }
+  main(process.argv.slice(2)).catch(err => { console.error(`poll: ${err.message}`); process.exitCode = 1; });
 }

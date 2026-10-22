@@ -1,43 +1,58 @@
 {
   "source": "https://github.com/cgwalters-forge/agent-board",
   "branch": "main",
-  "rev": "07de38a6bc6c96e466cd3736a0e2cf5ac2ae02b4",
-  "operator": "jmarrero",
-  "bot": "jmarrero-bot",
-  "generatedBy": "https://github.com/jmarrero-bot#llms",
-  "mergeAuthors": [],
-  "dispatchRepo": "jmarrero-forge/tracker",
+  "operator": "cgwalters",
+  "operatorComments": { "repositories": ["bootc-dev/*"] },
+  "bot": "cgwalters-bot",
+  "mergeAuthors": ["dependabot[bot]"],
+  "dispatchRepo": "cgwalters-forge/tracker",
   "dispatchWorkflow": "dispatch.yml",
   "reviewWorkflow": "review.yml",
+  "decisions": { "repository": "cgwalters-forge/operator", "issue": 1 },
+  "brokerOutage": { "repository": "cgwalters-forge/tracker", "author": "cgwalters-bot", "leadSeconds": 1800 },
   "follow": [
-    "jmarrero-forge/tracker",
-    "jmarrero-forge/actions",
-    "jmarrero-forge/review",
-    "jmarrero-forge/homegit"
+    "cgwalters-forge/agentic-job",
+    "cgwalters-forge/agent-board",
+    "cgwalters-forge/tracker",
+    "cgwalters-forge/actions",
+    "cgwalters-forge/review",
+    "cgwalters-forge/agenthome",
+    "cgwalters-forge/forge-infra"
   ],
   "fixPools": ["claude"],
-  "toilFixPool": "claude",
-  "kindPools": {},
+  "toilFixPool": "openai",
+  "rebaseRounds": 2,
+  "mergeQueue": { "tries": 3 },
+  "pace": { "repository": "cgwalters-forge/bot-ops", "issue": 1, "bot": "cgwalters-bot", "marginPercent": 95 },
+  "kindPools": { "triage": "claude", "research": "claude" },
   "epics": {
-    "repository": "jmarrero-forge/tracker"
+    "repository": "cgwalters-forge/tracker"
   },
   "coordinator": {
-    "planPool": "claude",
-    "statusPool": "claude",
-    "statusIssue": 1,
+    "reviewUrl": "https://cgwalters-forge.github.io/review/#",
+    "planPool": "tier-1",
+    "statusPool": "openai",
+    "statusIssue": 572,
     "statusHourUTC": 11
   },
   "schedule": {
-    "owner": "jmarrero-forge",
+    "owner": "cgwalters-forge",
     "project": 1,
-    "wip": 2,
+    "wip": 8,
+    "batch": 2,
+    "triage": 2,
+    "triagePool": "tier-1",
+    "fill": 4,
+    "operatorRetryPools": ["tier-1"],
     "priorityField": "Priority",
-    "triagePerPass": 1,
     "repositories": [
-      "jmarrero-forge/tracker",
-      "jmarrero-forge/actions",
-      "jmarrero-forge/review",
-      "jmarrero-forge/homegit"
+      "cgwalters-forge/tracker",
+      "cgwalters-forge/agentic-job",
+      "cgwalters-forge/agent-board",
+      "cgwalters-forge/review",
+      "cgwalters-forge/actions",
+      "cgwalters-forge/agenthome",
+      "cgwalters-forge/misctool"
     ]
   }
 }

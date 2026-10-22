@@ -1,152 +1,266 @@
-# agent-board's pull request poll, the board scheduler and the epic
-# coordinator, adapted from cgwalters-forge/tracker's poll.yml, in preview
-# only. jmarrero-bot's current controller (homegit's bot-poll and the
-# coordinator session) still acts on the same pull requests and board, and
-# only one controller may write at a time, so here nothing writes: the poll
-# always runs `--dry-run`, the scheduler and coordinator never get
-# `--apply`, and no step can start a run. Each pass prints what it would
-# have done in the run's summary, to compare with what bot-poll did. Letting
-# any of them act is a pull request here, made together with turning off
-# the matching part of bot-poll. Their token is read-only too:
-# JMARRERO_BOT_READ_TOKEN, jmarrero-bot's classic token with only the
-# read:project scope, which reads the organization's board and, like any
-# token, public repositories, and can write nothing.
+# Follows the bot's open pull requests to a fix, a merge or a human
+# (cgwalters-forge/agent-board#27). Polling because no event reaches us for
+# a fork pull request's failed check. agent-board is the only PR actor;
+# poll.cjs only adapts its output for the workflow.
 name: poll
-run-name: poll (preview)
+run-name: poll${{ inputs.dry-run && ' (dry run)' || '' }}
 
+# Three ways in, since GitHub delays and drops scheduled runs: the schedule,
+# the end of every dispatch run here (implement, fix or review), and the job
+# itself, which starts the next pass while a pull request is in flight.
 on:
   schedule:
-    - cron: '*/30 * * * *'
+    - cron: '*/10 * * * *'
+  # Runs this file as the default branch has it, with the default branch as
+  # github.ref, whatever ref the dispatch run was on. It checks out only the
+  # default branch, never the triggering run's head or artifacts.
+  workflow_run: # zizmor: ignore[dangerous-triggers]
+    workflows: [dispatch]
+    types: [completed]
   workflow_dispatch:
+    inputs:
+      dry-run:
+        description: Print what a pass would do and change nothing
+        type: boolean
+        default: false
+      # `just enqueue` sets it; schedule.cjs's requestedItems validates it.
+      items:
+        description: Issues (owner/repo#n, whitespace-separated) the board scheduler considers first
+        type: string
+        default: ''
 
 permissions: {}
-# One pass at a time; a pass that is due while one runs waits for it.
+# One pass at a time; a pass that is due while one runs waits for it. GitHub
+# keeps one pending run for a group and cancels an older pending one when
+# another arrives, so there is one run and at most one successor however
+# many triggers fire: the passes are one chain, never several. A dry run
+# changes nothing and has a group of its own, so it cannot displace the
+# pending pass that carries the chain on.
 concurrency:
-  group: poll
+  group: poll${{ inputs.dry-run && '-dry-run' || '' }}
   cancel-in-progress: false
 
 jobs:
-  # Whether the read token exists yet: a job cannot test a secret in its
-  # `if:`, so this one says it as an output, and without the token the two
-  # below are skipped with a notice rather than failing every pass.
-  token:
-    if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 2
-    permissions: {}
-    outputs:
-      ready: ${{ steps.token.outputs.ready }}
-    steps:
-      - name: Check for the read token
-        id: token
-        env:
-          READ_TOKEN: ${{ secrets.JMARRERO_BOT_READ_TOKEN }}
-        run: |
-          if [[ -n "$READ_TOKEN" ]]; then
-            echo "ready=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "::notice::JMARRERO_BOT_READ_TOKEN is not set; skipping this pass (README, Setup)"
-            echo "ready=false" >> "$GITHUB_OUTPUT"
-          fi
-
-  # The board scheduler, the epic census and the epic coordinator
-  # (.github/poll/schedule.cjs, epics.cjs and coordinator.cjs), previewed.
+  # The board scheduler (#401): starts the run an accepted plan on an open
+  # sub-issue of a live epic proposes, if it is an implement one, up to the cap in
+  # agent-board.json's `schedule`; .github/poll/schedule.cjs and the README
+  # say how. It only previews unless the repository variable BOARD_DISPATCH
+  # is `apply`, so it can be compared with the runs still started by hand
+  # before it is let act. In the passes' concurrency group like the poll
+  # job, so two passes never decide on the same board; fix runs the poll
+  # job starts in the same pass are counted against the cap in the next.
   board:
-    needs: token
-    if: ${{ needs.token.outputs.ready == 'true' }}
+    if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
     runs-on: ubuntu-26.04
     # The build, scheduler, census and coordinator each have their own bound;
     # leave room for all four and just setup inside the job's limit.
     timeout-minutes: 40
-    # Reads only: the job token lists dispatch.yml's runs, and starts none.
+    # `actions: write` starts dispatch.yml here, with the job token.
     permissions:
       contents: read
-      actions: read
+      actions: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
-        with:
-          just-version: 1.58.0
-      # Built afresh at the commit agent-board.json pins, as in the poll
-      # job: the binary is given the bot's token, so it comes from no cache
-      # and from no moving branch.
-      - name: Build agent-board at the pinned commit
+      # Built afresh, as in the poll job. Both binaries get the bot's token:
+      # whatever lands on
+      # agent-board's branch runs with it on the next pass, as whatever
+      # lands on the actions wrapper's main does in dispatch.yml (#544).
+      - name: Build agent-board at the branch's head
         timeout-minutes: 10
-        run: just build-agent-board
+        run: |
+          source=$(jq -er .source .github/poll/agent-board.json)
+          branch=$(jq -er .branch .github/poll/agent-board.json)
+          rev=$(git ls-remote --exit-code "$source" "refs/heads/$branch" | cut -f1)
+          [[ $rev =~ ^[0-9a-f]{40}$ ]]
+          cargo install --locked --root "$RUNNER_TEMP/agent-board" \
+            --git "$source" --rev "$rev" agent-board
       - name: One pass
         timeout-minutes: 15
         env:
-          # The bot's read-only token reads the organization's board; the
-          # job token reads dispatch.yml's runs.
-          GH_TOKEN: ${{ secrets.JMARRERO_BOT_READ_TOKEN }}
+          # The bot's token reads the organization's board, and is what
+          # `agent-board dispatch --apply` requires: a planner's own token,
+          # under which it records each plan it starts.
+          GH_TOKEN: ${{ secrets.CGWALTERS_BOT_PAT }}
           DISPATCH_TOKEN: ${{ github.token }}
           AGENT_BOARD: ${{ runner.temp }}/agent-board/bin/agent-board
+          # The runs this pass starts, which the coordinator counts against
+          # the cap before the runs list it reads shows them.
+          BOARD_DISPATCHED: ${{ runner.temp }}/board-dispatched
+          APPLY: ${{ !inputs.dry-run && vars.BOARD_DISPATCH == 'apply' && '--apply' || '' }}
+          # Through the environment, never the script, as any text may come.
+          ITEMS: ${{ inputs.items }}
         shell: bash
         # stderr too, so that the summary says why a pass failed.
-        run: node .github/poll/schedule.cjs 2>&1 | tee "$RUNNER_TEMP/pass.log"
+        run: node .github/poll/schedule.cjs ${APPLY:+"$APPLY"} 2>&1 | tee "$RUNNER_TEMP/pass.log"
       - name: Summary
         if: ${{ !cancelled() }}
         run: |
           {
-            echo '### Board scheduler (preview)'
+            echo '### Board scheduler'
             echo '<pre>'
             sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g' "$RUNNER_TEMP/pass.log" 2>/dev/null || echo 'No pass ran'
             echo '</pre>'
           } >> "$GITHUB_STEP_SUMMARY"
-      # The epic census: reads the live epics and prints their state; it
-      # writes nothing. Its failure is not the pass's: it is reported in its
-      # section, or, where Node could not load it, in the step's log.
+      # The epic census (#572): reads the live epics and prints their state,
+      # for the coordinator to come; it writes nothing. Its failure is not
+      # the pass's: it is reported in its section, or, where Node could not
+      # load it, in the step's log.
       - name: Epic census
         if: ${{ !cancelled() }}
         continue-on-error: true
         timeout-minutes: 5
         env:
-          GH_TOKEN: ${{ secrets.JMARRERO_BOT_READ_TOKEN }}
+          GH_TOKEN: ${{ secrets.CGWALTERS_BOT_PAT }}
         shell: bash
         run: node .github/poll/epics.cjs | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+        with:
+          just-version: 1.58.0
       - name: Coordinator
         if: ${{ !cancelled() }}
-        # Its summary retains errors without turning a successful scheduling
-        # pass into a failed job.
+        # Its coordinator/v1 summary retains errors for the controller panel,
+        # without turning a successful board scheduling pass into a failed job.
         continue-on-error: true
         timeout-minutes: 8
         env:
-          GH_TOKEN: ${{ secrets.JMARRERO_BOT_READ_TOKEN }}
+          GH_TOKEN: ${{ secrets.CGWALTERS_BOT_PAT }}
           DISPATCH_TOKEN: ${{ github.token }}
           AGENT_BOARD: ${{ runner.temp }}/agent-board/bin/agent-board
+          BOARD_DISPATCHED: ${{ runner.temp }}/board-dispatched
+          APPLY: ${{ !inputs.dry-run && vars.COORDINATOR == 'apply' && '--apply' || '' }}
         shell: bash
-        run: just coordinator
+        run: just coordinator ${APPLY:+"$APPLY"}
 
-  # agent-board's poll of the bot's pull requests in the followed
-  # repositories, as a dry run: no state is kept between passes and no next
-  # pass is started.
+  # One actor, built from repository-owned configuration on the default branch.
   poll:
-    needs: token
-    if: ${{ needs.token.outputs.ready == 'true' }}
+    if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
     runs-on: ubuntu-26.04
-    # Build (10), pass (6), plus checkout and setup.
-    timeout-minutes: 25
+    # Usage/supervisor/train dispatch (3), build (10), restore (2), pass (6), upload (2), successor wait (5),
+    # plus five minutes for checkout/setup and dispatch overhead.
+    timeout-minutes: 33
     permissions:
       contents: read
-      actions: read
+      actions: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # The source and the branch are in .github/poll/agent-board.json, with
+      # the logins and repositories below; our own repositories are followed
+      # at their branch, not pinned (#544). The head is resolved once so the
+      # build and the state's name below are of the same commit. Built each
+      # pass and never cached: a cache any job on the default branch can
+      # write is not where a binary that is later given the bot's token
+      # should come from.
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
         with:
           just-version: 1.58.0
-      - name: Build agent-board at the pinned commit
+      # GITHUB_TOKEN-started polls do not reliably raise workflow_run events.
+      # Explicit workflow_dispatch works with that token, even while idle;
+      # usage's freshness check and concurrency bound the work it starts.
+      - name: Refresh usage
+        if: ${{ !inputs.dry-run }}
+        continue-on-error: true
+        timeout-minutes: 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: just refresh-usage
+      # Same gap for supervisor.yml's workflow_run trigger (#763). It paces a
+      # prompt-less dispatch like a poll-chain start and keeps one pending
+      # run in supervisor-health, so a start every pass costs a short job.
+      - name: Start supervisor
+        if: ${{ !inputs.dry-run }}
+        continue-on-error: true
+        timeout-minutes: 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: just start-supervisor
+      # Cron starvation can leave a due release waiting indefinitely. Reuse
+      # the train's opt-in and serialized, cheap due check, not a second clock.
+      - name: Start release train
+        if: ${{ !inputs.dry-run && (vars.RELEASE_TRAIN == 'dry-run' || vars.RELEASE_TRAIN == 'apply') }}
+        continue-on-error: true
+        timeout-minutes: 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: just start-release-train
+      - name: Build agent-board at the branch's head
+        id: build
         timeout-minutes: 10
         run: just build-agent-board
+      # The state file holds cached response bodies the poll trusts and its
+      # idle interval, so it is read back only from what this job saved: the
+      # newest artifact of its name from a run of this file on the default
+      # branch, started by one of its own triggers in this repository. The
+      # name alone is not enough, as dispatch runs here upload artifacts on
+      # the default branch too, nor is the branch: a fork's pull request
+      # from its main, editing this file, reports main as well. It is named
+      # for the commit built, so a new commit, which may not read an older
+      # state, starts afresh, as does none (the first pass, or expired, or
+      # this step failing): agent-board allows that, the state being
+      # disposable.
+      - name: Restore the state of the last pass
+        if: ${{ !inputs.dry-run }}
+        continue-on-error: true
+        # A stalled artifact read must leave time for the successor dispatch.
+        timeout-minutes: 2
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          ARTIFACT: agent-board-poll-apply-state-${{ steps.build.outputs.rev }}
+        run: |
+          runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=$ARTIFACT&per_page=10" \
+            --jq '.artifacts | sort_by(.created_at) | reverse | .[]
+              | select((.expired | not) and .workflow_run.head_branch == env.DEFAULT_BRANCH) | .workflow_run.id')
+          for run in $runs; do
+            ours=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run" --jq 'select(
+              .path == ".github/workflows/poll.yml" and .head_repository.id == .repository.id
+              and (.event | IN("schedule", "workflow_run", "workflow_dispatch"))) | .id')
+            [[ $ours == "$run" ]] || continue
+            gh run download "$run" --repo "$GITHUB_REPOSITORY" --name "$ARTIFACT" --dir "$RUNNER_TEMP"
+            echo "State from run $run"
+            exit 0
+          done
+          echo 'No saved state; starting afresh'
       - name: One pass
+        id: pass
         timeout-minutes: 6
         env:
-          GH_TOKEN: ${{ secrets.JMARRERO_BOT_READ_TOKEN }}
+          GH_TOKEN: ${{ secrets.CGWALTERS_BOT_PAT }}
           DISPATCH_TOKEN: ${{ github.token }}
           AGENT_BOARD: ${{ runner.temp }}/agent-board/bin/agent-board
           POLL_STATE: ${{ runner.temp }}/poll-state.json
+          # Off until this repository secret is set. The PAT must also have
+          # issue read/write access to the private configured decisions issue.
+          DECISIONS_STATE_KEY: ${{ secrets.DECISIONS_STATE_KEY }}
+          MODE: ${{ inputs.dry-run && '--dry-run' || '--apply' }}
         shell: bash
-        run: just poll --dry-run
+        run: just poll "$MODE"
+      # Only a clean pass's state is kept: one that failed may not have
+      # written it, and re-saving what was restored would carry a state the
+      # pass cannot read into every later pass. Kept long enough to outlast
+      # an idle gap of six hours, agent-board's longest.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !inputs.dry-run && steps.pass.outcome == 'success' }}
+        timeout-minutes: 2
+        with:
+          name: agent-board-poll-apply-state-${{ steps.build.outputs.rev }}
+          path: |
+            ${{ runner.temp }}/poll-state.json
+            ${{ runner.temp }}/poll-state.json.decisions.enc
+          if-no-files-found: ignore
+          retention-days: 2
+      - name: Start the next pass while active or after a failure
+        if: ${{ !cancelled() && !inputs.dry-run && (failure() || steps.pass.outputs.in-flight == 'true') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          WAIT_SECONDS: '300'
+        run: |
+          sleep "$WAIT_SECONDS"
+          gh workflow run poll.yml --repo "$GITHUB_REPOSITORY" --ref "$DEFAULT_BRANCH"

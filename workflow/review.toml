@@ -7,7 +7,7 @@
 # actor, the `if:` the author. The agent reviews the head as data, without
 # a credential.
 hosts = ["github.com"]
-repos = ["jmarrero-forge/tracker"]
+repos = ["cgwalters-forge/tracker"]
 bases = ["main"]
 max_outputs = 1
 max_patch_bytes = 1024
