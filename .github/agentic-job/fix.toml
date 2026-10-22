@@ -1,15 +1,23 @@
 # Bounds for dispatch.yml's `fix` kind, which pushes to the branch of a
-# pull request that apply itself opened from the bot's fork
-# (cgwalters-forge/agentic-job#435): one commit on top, or the whole
-# series again with the fix folded in. Apply may also push to another head
-# repository, but only one whose default branch has
-# `.github/agentic-job/accept-owner-branches` naming it (agentic-job's
-# docs/safe-outputs.md), and `.github` stays refused there. A separate file
-# from dispatch.toml because the push type has no per-repository list of
-# its own: the repositories named here are the only ones a fix may target.
+# pull request the bot opened, by apply from its fork
+# (cgwalters-forge/agentic-job#435) or by hand (`bot/**`): one commit on top, or the whole
+# series again with the fix folded in. Since cgwalters-forge/agentic-job#553
+# apply may also push to another head repository, but only one whose
+# default branch has `.github/agentic-job/accept-owner-branches` naming it
+# (agentic-job's docs/safe-outputs.md), and `.github` stays refused there.
+# A separate file from dispatch.toml because the push type has no
+# per-repository list of its own: the repositories named here are the only
+# ones a fix may target.
 hosts = ["github.com"]
-# dispatch.toml's repositories: every one the poll follows is among them.
-repos = ["jmarrero-forge/tracker", "jmarrero-forge/actions", "jmarrero-forge/review", "jmarrero-forge/homegit", "jmarrero-forge/bootc", "jmarrero-forge/ostree", "jmarrero-forge/rpm-ostree"]
+# Includes every repository the poll follows; misctool remains fixable by
+# hand but is not followed until it has a review workflow. bootc-dev/* by
+# the operator's decision D17 (docs/operator-notes.md, 2026-10-17), which
+# names the organization: fix rounds on the bot's own
+# pull requests there, from its fork; since #710 also from the midstream
+# fork cgwalters-forge/bootc (`bot/**` below says how apply bounds the head
+# repository). A fix there may not edit `.github` or AGENTS.md (not listed
+# below).
+repos = ["cgwalters-forge/tracker", "cgwalters-forge/actions", "cgwalters-forge/agenthome", "cgwalters-forge/agentic-job", "cgwalters-forge/agent-board", "cgwalters-forge-stage/board-test", "cgwalters-forge/review", "cgwalters-forge/misctool", "bootc-dev/*", "cgwalters-forge/composefs-rs", "cgwalters-forge/bootc", "cgwalters-forge/forge-infra"]
 bases = ["main"]
 max_outputs = 3
 max_patch_bytes = 1048576
@@ -20,8 +28,29 @@ max_patch_files = 50
 # (agentic-job's docs/safe-outputs.md, "Replacing the complete series"):
 # review feedback is folded into the commit it corrects, never a commit of
 # its own. Each commit of the series is checked like a patch, and the push
-# is a force with a lease on the head the run was pinned to.
-push_to_pull_request_branch = { max = 1, branches = ["dispatch/**"], replacement_max_commits = 5 }
+# is a force with a lease on the head the run was pinned to. A pull
+# request here is one to three commits. `ready_when_complete` as for
+# dispatch.toml's create_pull_request, whose comment says why.
+#
+# `bot/**` is the homegit era's branches: the bot's bootc-dev pull requests
+# from the midstream fork cgwalters-forge/bootc, and the staged ones within
+# cgwalters-forge/composefs-rs and cgwalters-forge/bootc (#710). Both globs
+# hold for every repository above and every head, as the bounds bound no
+# head repository; apply does (agentic-job's workflow/push.cjs). It
+# pushes only where the bot has write access, and there only to the bot's
+# own fork, or to a fork of the target or the target itself whose default
+# branch has `.github/agentic-job/accept-owner-branches` naming it: the
+# bot's write access alone is not that acceptance. So the file, added by
+# hand to a repository's main, is what lets a head other than the bot's
+# fork take a push, on any branch these globs admit. Neither midstream
+# fork has it yet, so their pushes fail at apply until the operator adds
+# it, accepting that the fork's own workflows run the pushed commits.
+#
+# `release-train/**` is the release train's version-bump and pin pull
+# requests (.github/release-train), which the poll now follows like any
+# bot pull request (agent-board#142): a new release can need its pin bump
+# fixed, as actions#73 did for v0.6.2.
+push_to_pull_request_branch = { max = 1, branches = ["dispatch/**", "bot/**", "release-train/**"], replacement_max_commits = 5, ready_when_complete = true }
 # A blocked fix must explain itself without inventing a patch. Check pins
 # this comment to the run's pull request; no labels or other writes are added.
 add_comment = { max = 1 }
@@ -29,8 +58,29 @@ noop = { max = 1 }
 missing_tool = { max = 1 }
 missing_data = { max = 1 }
 
-# The same list as dispatch.toml's, which poll.test.cjs checks: none yet.
+# A fix's push may edit `.github/` (workflows included) in these
+# repositories and no other, as a pull request may (dispatch.toml), when
+# the push goes to the bot's fork, which has Actions off. Needed so a fix or
+# a replacement series can carry a pull request's `.github` changes. `files`
+# also lets them edit AGENTS.md there.
 [unprotected_files]
-repos = []
-files = []
-dot_folders = []
+# The same list as dispatch.toml's, which poll.test.cjs checks;
+# the precondition for listing a repository is in its comment.
+repos = ["cgwalters-forge/agentic-job", "cgwalters-forge/agent-board", "cgwalters-forge/tracker", "cgwalters-forge/review", "cgwalters-forge/actions", "cgwalters-forge/agenthome", "cgwalters-forge/misctool"]
+# README.md too: a docs run there is refused otherwise (cgwalters-forge/agent-board#49).
+# And every other name on agentic-job's default protected list, by the
+# operator's decision (21 Oct): a blocked manifest or lockfile meant a run
+# handed back a change CI couldn't build and a person had to land it
+# (agentic-job#1450). The same review gates these as gates `.github/`, and
+# each repository's review task checks dependency changes as supply chain.
+files = ["AGENTS.md", "README.md", "package.json", "bun.lockb",
+  "bunfig.toml", "deno.json", "deno.jsonc", "deno.lock", "global.json",
+  "NuGet.Config", "Directory.Packages.props", "mix.exs", "mix.lock",
+  "go.mod", "go.sum", "stack.yaml", "stack.yaml.lock", "pom.xml",
+  "build.gradle", "build.gradle.kts", "settings.gradle",
+  "settings.gradle.kts", "gradle.properties", "package-lock.json",
+  "yarn.lock", "pnpm-lock.yaml", "npm-shrinkwrap.json", "requirements.txt",
+  "Pipfile", "Pipfile.lock", "pyproject.toml", "setup.py", "setup.cfg",
+  "Gemfile", "Gemfile.lock", "uv.lock", "CODEOWNERS", "DESIGN.md",
+  "CONTRIBUTING.md", "SECURITY.md", "CODE_OF_CONDUCT.md", "CLAUDE.md"]
+dot_folders = [".github"]

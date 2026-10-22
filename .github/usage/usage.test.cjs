@@ -5,9 +5,12 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const http = require('node:http');
-const { MARKER, carryPools, checkConfig, findComment, mistralAllowance, mistralUsage, poolPace, previousSnapshot, publish, readBroker, render, snapshot } = require('./usage.cjs');
+const { MARKER, carryPools, checkConfig, findComment, mistralAllowance, mistralUsage, needsPublish, poolPace, previousSnapshot, publish, readBroker, render, request, snapshot } = require('./usage.cjs');
 
-const CONFIG = require('./config.json');
+// The live config's shape, with pacing fixed so the tests don't move when the
+// operator retunes it.
+const CONFIG = { ...require('./config.json'), pacing: { claude: { target: 0.95, burst: 3 }, openai: { target: 0.95, burst: 3 } } };
+const POOLS = require('../agentic-job/pools.json');
 const load = () => structuredClone(require('./testdata/broker-usage.json'));
 const NOW = Date.parse('2026-10-08T10:00:00Z');
 const PACING = { target: 0.95, burst: 3 };
@@ -16,8 +19,53 @@ const MISTRAL = { model: 'mistral-medium', allowance: { amount: 300, currency: '
 const PRICES = { 'mistral-medium': { input: 0.4, output: 2 } };
 const close = (a, b) => assert.ok(Math.abs(a - b) < 1e-6, `${a} != ${b}`);
 
-test('the repository config is usable', () => {
+test('freshness skips only when every configured pool observation is under ten minutes old', async () => {
+  const fresh = () => ({ schema: 'bot-usage/v1', pools: Object.fromEntries(
+    Object.keys(CONFIG.pacing).map(name => [name, { observed_at: new Date(NOW - 9 * 60e3).toISOString() }]),
+  ) });
+  const first = Object.keys(CONFIG.pacing)[0];
+  for (const [label, mutate, expected] of [
+    ['fresh', () => {}, false],
+    ['boundary', s => { s.pools[first].observed_at = new Date(NOW - 10 * 60e3).toISOString(); }, true],
+    ['stale', s => { s.pools[first].observed_at = new Date(NOW - 46 * 60e3).toISOString(); s.updated_at = new Date(NOW).toISOString(); }, true],
+    ['missing pool', s => { delete s.pools[first]; }, true],
+    ['null pool', s => { s.pools[first] = null; }, true],
+    ['invalid date', s => { s.pools[first].observed_at = 'invalid'; }, true],
+    ['future', s => { s.pools[first].observed_at = new Date(NOW + 1).toISOString(); }, true],
+    ['wrong schema', s => { s.schema = 'unknown'; }, true],
+  ]) {
+    const snap = fresh();
+    mutate(snap);
+    const body = `${MARKER}\n\n\`\`\`json\n${JSON.stringify(snap)}\n\`\`\``;
+    const request = async (method, url) => {
+      assert.equal(method, 'GET');
+      assert.equal(url, `/repos/${CONFIG.repo}/issues/${CONFIG.issue}/comments?per_page=100`);
+      return [{ user: { login: CONFIG.bot }, body }];
+    };
+    assert.equal(await needsPublish({ config: CONFIG, request, now: NOW }), expected, label);
+  }
+  for (const comments of [[], [{ user: { login: CONFIG.bot }, body: `${MARKER}\ninvalid` }],
+    [{ user: { login: 'another-user' }, body: render(fresh(), 'test') }]]) {
+    assert.equal(await needsPublish({ config: CONFIG, request: async () => comments, now: NOW }), true);
+  }
+  await assert.rejects(needsPublish({ config: CONFIG, request: async () => { throw new Error('unavailable'); }, now: NOW }), /unavailable/);
+});
+
+test('workflow checks freshness before joining and uses only default-branch code', () => {
+  const workflow = require('node:fs').readFileSync(require('node:path').join(__dirname, '../workflows/usage.yml'), 'utf8');
+  assert.match(workflow, /workflow_run:[\s\S]*workflows: \[poll\]\n\s+types: \[completed\]/);
+  assert.match(workflow, /github.ref == format\('refs\/heads\/\{0\}', github.event.repository.default_branch\)/);
+  assert.match(workflow, /group: usage\n\s+cancel-in-progress: false/);
+  assert.ok(workflow.indexOf('just publish-usage --check-freshness') < workflow.indexOf('name: Join the tailnet'));
+  for (const step of ['Join the tailnet', 'Publish']) {
+    assert.ok(workflow.includes(`- name: ${step}\n        if: steps.freshness.outputs.publish == 'true'`));
+  }
+  assert.doesNotMatch(workflow, /github.event.workflow_run\.|download-artifact/);
+});
+
+test('the repository config and the Mistral allowance in pools.json are usable', () => {
   checkConfig(CONFIG);
+  assert.ok(mistralAllowance(POOLS.mistral, load(), NOW), 'pools.json mistral.allowance is one usage.cjs can publish');
   for (const bad of [{ ...CONFIG, repo: 'bot-ops' }, { ...CONFIG, issue: 0 }, { ...CONFIG, pacing: { claude: PACING } }]) {
     assert.throws(() => checkConfig(bad));
   }
@@ -44,6 +92,7 @@ test('the broker answer becomes the pools and Mistral counters of bot-usage/v1',
   assert.deepEqual(snap.mistral, {
     requests: 8,
     tokens: 3900,
+    observed_at: new Date(NOW).toISOString(),
     since: '2026-10-05T00:00:00.000Z',
     allowance: { limit_usd: 300, resets_at: '2026-11-01T00:00:00.000Z' },
   });
@@ -160,8 +209,47 @@ test('a pool the broker has no reading of keeps the last one until its window re
   assert.deepEqual(carryPools(snapshot(load(), CONFIG, null, later), { pools: { claude: { ...previous.pools.claude, used_percent: 1 } } }, CONFIG, later).pools.claude.used_percent, previous.pools.claude.used_percent);
   const afterReset = Date.parse('2026-10-11T00:00:01Z');
   assert.equal(carryPools(snapshot(restarted(), CONFIG, null, afterReset), previous, CONFIG, afterReset).pools.claude, null);
+  // One pool seen again since the restart, the other carried.
+  const partial = restarted();
+  partial.codex = load().codex;
+  const mixed = carryPools(snapshot(partial, CONFIG, null, later), previous, CONFIG, later);
+  assert.equal(mixed.pools.openai.computed_at, new Date(later).toISOString());
+  assert.equal(mixed.pools.claude.observed_at, previous.pools.claude.observed_at);
   assert.equal(previousSnapshot(render(previous, 'x')).updated_at, previous.updated_at);
+});
+
+test('each weekly number keeps its own observation time, not the newer short window', () => {
+  const broker = load();
+  broker.anthropic.unified_5h.observed_at = NOW / 1000;
+  broker.codex.primary.observed_at = NOW / 1000;
+  const before = snapshot(load(), CONFIG, null, NOW);
+  const after = snapshot(broker, CONFIG, null, NOW + HOUR);
+  for (const name of ['claude', 'openai']) {
+    assert.equal(after.pools[name].observed_at, before.pools[name].observed_at);
+    assert.equal(after.pools[name].computed_at, new Date(NOW + HOUR).toISOString());
+    assert.ok(after.pools[name].allowed_percent > before.pools[name].allowed_percent);
+  }
   for (const body of [undefined, '', `${MARKER}\n\`\`\`json\n{nope\n\`\`\``]) assert.equal(previousSnapshot(body), null);
+});
+
+test('both providers discard a pre-reset hold and pace a new week from its reset', () => {
+  const week = 7 * 24 * HOUR;
+  for (const name of ['claude', 'openai']) {
+    const broker = load();
+    const reset = NOW + HOUR;
+    if (name === 'claude') Object.assign(broker.anthropic.unified_7d, { utilization: 1, reset: reset / 1000 });
+    else Object.assign(broker.codex.secondary, { used_percent: 100, reset_after_seconds: reset / 1000 - broker.codex.secondary.observed_at });
+    assert.equal(snapshot(broker, CONFIG, null, reset - 1).pools[name].hold, true);
+    for (const now of [reset, reset + 1]) assert.equal(snapshot(broker, CONFIG, null, now).pools[name], null);
+    if (name === 'claude') Object.assign(broker.anthropic.unified_7d, { utilization: 0, reset: (reset + week) / 1000, observed_at: reset / 1000 });
+    else Object.assign(broker.codex.secondary, { used_percent: 0, reset_after_seconds: week / 1000, observed_at: reset / 1000 });
+    const fresh = snapshot(broker, CONFIG, null, reset).pools[name];
+    assert.equal(fresh.allowed_percent, 0);
+    assert.equal(fresh.used_percent, 0);
+    assert.equal(fresh.hold, false);
+    assert.equal(fresh.next_dispatch_at, null);
+    close(snapshot(broker, CONFIG, null, reset + HOUR).pools[name].allowed_percent, 95 / 168);
+  }
 });
 
 // A fake GitHub: the repository, the issue's comments, the token's
@@ -209,15 +297,20 @@ test('publish looks only where the review app reads, and does not add a comment 
   assert.deepEqual(gh.calls.filter(c => c.method === 'GET').map(c => c.path), [`/repos/${CONFIG.repo}`, `/repos/${CONFIG.repo}/issues/${CONFIG.issue}/comments?per_page=100`]);
 });
 
-test('publish leaves the last snapshot alone when there is no pool reading to replace it with', async () => {
+test('publish carries pools until their windows reset, then clears the holds and still publishes Mistral', async () => {
   const gh = github();
   await publishWith(gh, snapshot(restarted(), CONFIG, null, NOW));
-  assert.deepEqual(gh.writes(), []);
-  // With a previous snapshot to carry from, it writes.
+  assert.equal(gh.writes().length, 1);
   const previous = { id: 9, html_url: 'u', user: { login: CONFIG.bot }, body: render(snapshot(load(), CONFIG, null, NOW), 'x') };
   const again = github({ comments: [previous] });
   await publishWith(again, snapshot(restarted(), CONFIG, null, NOW + HOUR));
   close(previousSnapshot(again.writes()[0].body.body).pools.claude.used_percent, 81);
+  const afterReset = Date.parse('2026-10-20T00:00:00Z');
+  const reset = github({ comments: [previous] });
+  await publishWith(reset, snapshot(restarted(), CONFIG, null, afterReset));
+  const published = previousSnapshot(reset.writes()[0].body.body);
+  assert.deepEqual(published.pools, { claude: null, openai: null });
+  assert.equal(published.mistral.observed_at, new Date(afterReset).toISOString());
 });
 
 test('readBroker reads /usage at the root of the broker, bounded', async t => {
@@ -235,4 +328,18 @@ test('readBroker reads /usage at the root of the broker, bounded', async t => {
   await assert.rejects(readBroker(base), /answer over/);
   answer = '<html>';
   await assert.rejects(readBroker(base), /\/usage: not JSON/);
+});
+
+test('a GitHub request that stalls fails the call with its method and path', { timeout: 10e3 }, async t => {
+  // Accepts and never answers, or sends the headers and stalls in the body.
+  const server = http.createServer((req, res) => {
+    if (req.url === '/body') { res.writeHead(200); res.write('{'); }
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const realFetch = globalThis.fetch;
+  t.mock.method(globalThis, 'fetch', (url, init) => realFetch(url.replace('https://api.github.com', base), init));
+  await assert.rejects(request('token', 'GET', '/silent', undefined, 200), { message: /^GET \/silent: .*timeout/ });
+  await assert.rejects(request('token', 'PATCH', '/body', {}, 200), { message: /^PATCH \/body: .*timeout/ });
 });

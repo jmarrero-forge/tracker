@@ -1,0 +1,287 @@
+# The controller's supervisor (#626). A deterministic, read-only health pass
+# every fifteen minutes; when a check fails, or on a two-hour sweep, an agent
+# reads the report and asks for typed actions; an executor holding the bot's
+# token performs only the dispatch requests agent-board admits and logs
+# each in the supervisor log issue. The agent and the executor are off until
+# SUPERVISOR is preview or apply; only apply executes requests.
+name: supervisor
+# Started like the poll, at the end of each of its runs, because GitHub's
+# cron can go hours without firing (#730); .github/poll/supervisor-due.cjs
+# limits those starts to a health pass every fifteen minutes and a sweep
+# every two hours. Self-dispatched poll passes raise no workflow_run, so
+# each poll pass also dispatches this without a prompt (#763), which is
+# paced the same way. The crons are only a fallback for a stalled poll.
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+    - cron: '7 */2 * * *'
+  # Runs this file as the default branch has it and uses nothing of the
+  # triggering run's. dispatch -> poll -> supervisor is within GitHub's
+  # three-level limit on workflow_run chains.
+  workflow_run: # zizmor: ignore[dangerous-triggers]
+    workflows: [poll]
+    types: [completed]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: Public operator request for the supervisor
+        type: string
+        default: ''
+permissions: {}
+# The agent-board commit both jobs build: the executor receives the bot's
+# token, so it runs only a revision reviewed here, never agent-board's
+# moving branch, and health/trigger and execute agree within a run. At this
+# commit every write but the log is capped at zero unless config.json sets
+# a cap. Move it only with a review of that revision's `supervise` code.
+env:
+  AGENT_BOARD_REV: bfeb126054abf5b024e71ca42ffd401247782989
+# Keep whole runs serialized: trigger considers the previous workflow active
+# through execute, even after its agent job ends, so a job-only group would
+# discard manual prompts in that window. GitHub keeps one pending run per
+# group and a newer arrival replaces it, so the fifteen-minute health passes
+# get their own group: sharing one, the next pass would evict a prompt queued
+# behind a long agent run. A health pass that finds an agent active declines
+# (failures keep their cooldown and retry); a manual prompt declined that way
+# fails visibly below. A run the health job skips (any comment but the
+# operator's on the requests issue, or a run off the default branch) gets a
+# group of its own: in a shared group it would evict a pending run and then
+# do nothing (#803). That first branch is the negation of health's `if`
+# (tested). A prompt-less dispatch, the poll's start every pass, is a health
+# pass too: in supervisor-agent it would evict a prompt.
+concurrency:
+  group: >-
+    ${{ (!(github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+    (github.event_name != 'issue_comment' ||
+    (github.event.comment.user.login == (vars.OPERATOR || 'cgwalters') &&
+    github.event.issue.number == fromJSON(vars.SUPERVISOR_REQUESTS_ISSUE || '656') && github.event.issue.locked == true &&
+    !github.event.issue.pull_request))) && format('supervisor-ignored-{0}', github.run_id)) ||
+    ((github.event.schedule == '*/15 * * * *' || github.event_name == 'workflow_run' ||
+    (github.event_name == 'workflow_dispatch' && inputs.prompt == '')) && 'supervisor-health') ||
+    'supervisor-agent' }}
+  cancel-in-progress: false
+jobs:
+  health:
+    # Stop outsider comments spending inference or steering a bot-token executor.
+    # Keep the login and issue aligned with the trusted config (tested below).
+    # This gate runs before checkout, so another deployment names its own in
+    # the repository variables OPERATOR and SUPERVISOR_REQUESTS_ISSUE; the
+    # defaults are this deployment's. Set them to agent-board.json's operator
+    # and config.json's agent.requests.issue: supervisor-profile.cjs checks
+    # the comment against those again before any agent runs, but a mismatched
+    # login still gets a health pass and a supervisor-agent group slot.
+    if: >-
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      (github.event_name != 'issue_comment' ||
+       (github.event.comment.user.login == (vars.OPERATOR || 'cgwalters') &&
+        github.event.issue.number == fromJSON(vars.SUPERVISOR_REQUESTS_ISSUE || '656') && github.event.issue.locked == true &&
+        !github.event.issue.pull_request))
+    runs-on: ubuntu-26.04
+    # Build (10), previous report (2), pacing (1), collection (8), plus setup/upload.
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      actions: read
+      issues: read
+      pull-requests: read
+      # The annotations of failed dispatch jobs, which say why they failed.
+      checks: read
+    outputs:
+      act: ${{ steps.trigger.outputs.act }}
+      repo: ${{ steps.trigger.outputs.repo }}
+      item: ${{ steps.trigger.outputs.item }}
+      task: ${{ steps.compose.outputs.task }}
+      agent: ${{ steps.trigger.outputs.agent }}
+      model: ${{ steps.trigger.outputs.model }}
+      budget: ${{ steps.trigger.outputs.budget }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+        with:
+          just-version: 1.58.0
+      # read=true only when this run's report was downloaded or none exists,
+      # never when the lookup failed, so the pacing can tell the two apart
+      # (#814). Listing the artifact by name is one request, where listing
+      # runs and trying each for an artifact took up to 51 of the job
+      # token's hourly share. The name alone is not enough: another
+      # workflow, or a fork's pull request from its main, can upload one, so
+      # only this file's runs from its own triggers here are read; and as
+      # those could fill the page, a page with none of ours is not "none".
+      - name: Previous health report
+        id: previous
+        continue-on-error: true
+        timeout-minutes: 2
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts?name=supervisor-health&per_page=10" \
+            --jq '.artifacts | sort_by(.created_at) | reverse | .[] | select(.expired | not) | .workflow_run.id')
+          for run in $runs; do
+            ours=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run" --jq 'select(
+              .path == ".github/workflows/supervisor.yml" and .head_branch == env.DEFAULT_BRANCH
+              and .head_repository.id == .repository.id
+              and (.event | IN("schedule", "workflow_run", "workflow_dispatch", "issue_comment"))) | .id')
+            [[ $ours == "$run" ]] || continue
+            # Moved into place whole, so a failed download leaves no partial report.
+            gh run download "$run" --repo "$GITHUB_REPOSITORY" --name supervisor-health --dir "$RUNNER_TEMP/previous-download"
+            mv "$RUNNER_TEMP/previous-download" "$RUNNER_TEMP/previous-health"
+            echo 'read=true' >> "$GITHUB_OUTPUT"
+            exit 0
+          done
+          [[ -z $runs ]] || exit 1
+          echo 'read=true' >> "$GITHUB_OUTPUT"
+      # Before the build, so a run the poll started too soon ends in seconds.
+      - name: Whether a pass is due
+        id: due
+        timeout-minutes: 1
+        env:
+          EVENT: ${{ github.event_name }}
+          PROMPT: ${{ inputs.prompt }}
+          READ: ${{ steps.previous.outputs.read }}
+        run: node .github/poll/supervisor-due.cjs
+      # Built fresh, never a cached binary that another job could replace
+      # before token use.
+      - name: Build agent-board at the pinned revision
+        if: ${{ steps.due.outputs.health == 'true' }}
+        timeout-minutes: 10
+        run: just build-agent-board "$AGENT_BOARD_REV"
+      - name: Read-only health snapshot
+        if: ${{ steps.due.outputs.health == 'true' }}
+        timeout-minutes: 8
+        env:
+          GH_TOKEN: ${{ secrets.CGWALTERS_BOT_PAT }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          "$RUNNER_TEMP/agent-board/bin/agent-board" supervise health \
+            --config .github/poll/agent-board.json --supervisor-config .github/supervisor/config.json \
+            --usage-config .github/usage/config.json --previous "$RUNNER_TEMP/previous-health/health.json" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        # Without a report, nothing: the next run looks back to the last one
+        # that has it, and its times, so a failed pass records no sweep.
+        if: ${{ !cancelled() && steps.due.outputs.health == 'true' && hashFiles('health.json') != '' }}
+        with:
+          name: supervisor-health
+          path: |
+            health.json
+            times.json
+          retention-days: 2
+      # Off unless agent.skipUnchangedFailures: a pass whose failures all
+      # failed in the previous report leaves them to the sweep (#804).
+      - name: Whether a check newly fails
+        id: repeat
+        if: ${{ steps.due.outputs.health == 'true' }}
+        # A failure here sets no skip, so the trigger runs as before.
+        continue-on-error: true
+        timeout-minutes: 1
+        env:
+          DAILY: ${{ steps.due.outputs.daily == 'true' && '--daily' || '' }}
+        run: node .github/poll/supervisor-repeat.cjs
+      # Decides from health.json and this workflow's own recent runs; the job
+      # token reads them. --daily bypasses cooldown, not an active agent, for
+      # explicit requests and the sweep; failures retain the normal cooldown.
+      - name: Whether the agent runs
+        id: trigger
+        if: ${{ steps.due.outputs.health == 'true' && steps.repeat.outputs.skip != 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DAILY: ${{ steps.due.outputs.daily == 'true' && '--daily' || '' }}
+        run: |
+          "$RUNNER_TEMP/agent-board/bin/agent-board" supervise trigger \
+            --config .github/poll/agent-board.json --supervisor-config .github/supervisor/config.json \
+            --pools .github/agentic-job/pools.json ${DAILY:+"$DAILY"} >> "$GITHUB_OUTPUT"
+      # Operator comments also reach an active agent through watch-item; a
+      # prompt has no other way in, so its operator must see it was dropped.
+      - name: Fail a manual prompt the trigger declined
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.prompt != '' && steps.trigger.outputs.act != 'true' && (vars.SUPERVISOR == 'preview' || vars.SUPERVISOR == 'apply') }}
+        run: |
+          echo "::error::The trigger declined this prompt, most likely because another supervisor agent run is active. Repeat it when that run ends."
+          exit 1
+      - name: Supervisor profile and operator request
+        id: compose
+        if: ${{ steps.trigger.outputs.act == 'true' && (vars.SUPERVISOR == 'preview' || vars.SUPERVISOR == 'apply') }}
+        timeout-minutes: 2
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TASK: ${{ steps.trigger.outputs.task }}
+          PROMPT: ${{ inputs.prompt }}
+        run: node .github/poll/supervisor-profile.cjs
+
+  # The agent: a research run of the shared wrapper on the requests issue,
+  # whose one checked add_comment carries the typed requests. Its token is
+  # the wrapper's read-only job token; the bot's token reaches only apply,
+  # which posts that comment, as for every dispatch.
+  agent:
+    needs: health
+    if: ${{ (vars.SUPERVISOR == 'preview' || vars.SUPERVISOR == 'apply') && needs.health.outputs.act == 'true' }}
+    uses: cgwalters-forge/actions/.github/workflows/cgwalters-agentic-job.yml@main
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+      actions: read
+      id-token: write
+    with:
+      task: ${{ needs.health.outputs.task }}
+      repo: ${{ needs.health.outputs.repo }}
+      item: ${{ needs.health.outputs.item }}
+      kind: research
+      config: .github/agentic-job/supervisor.toml
+      agent: ${{ needs.health.outputs.agent }}
+      model: ${{ needs.health.outputs.model }}
+      budget: ${{ needs.health.outputs.budget }}
+      apply-environment: agent-apply
+    secrets:
+      SAFE_OUTPUTS_PAT: ${{ secrets.CGWALTERS_BOT_PAT }}
+
+  # Runs no agent-produced code: it parses the requests as data.
+  execute:
+    needs: agent
+    if: ${{ (vars.SUPERVISOR == 'preview' || vars.SUPERVISOR == 'apply') && needs.agent.outputs.result-url != '' }}
+    # Health passes run outside supervisor-agent, so keep the executor's cap
+    # census and reservation serialized across both groups.
+    concurrency:
+      group: supervisor-execute
+      cancel-in-progress: false
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    environment: agent-apply
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+        with:
+          just-version: 1.58.0
+      - name: Build agent-board at the pinned revision
+        if: ${{ vars.SUPERVISOR == 'apply' }}
+        timeout-minutes: 10
+        run: just build-agent-board "$AGENT_BOARD_REV"
+      # Preview has no bot token and never calls execute, which always writes
+      # its log even for a refused batch. List the proposed comment only.
+      - name: Preview requests without applying
+        if: ${{ vars.SUPERVISOR == 'preview' }}
+        timeout-minutes: 2
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULT_URL: ${{ needs.agent.outputs.result-url }}
+        run: node .github/poll/supervisor-profile.cjs preview
+      - name: Perform the validated requests
+        if: ${{ vars.SUPERVISOR == 'apply' }}
+        timeout-minutes: 8
+        env:
+          GH_TOKEN: ${{ secrets.CGWALTERS_BOT_PAT }}
+          RESULT_URL: ${{ needs.agent.outputs.result-url }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          "$RUNNER_TEMP/agent-board/bin/agent-board" supervise execute \
+            --config .github/poll/agent-board.json --supervisor-config .github/supervisor/config.json \
+            --pools .github/agentic-job/pools.json --result-url "$RESULT_URL" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
