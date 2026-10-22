@@ -1,7 +1,6 @@
-# Moves the commit pins of third-party actions daily, those whose release
-# tag is in a comment beside the pin. jmarrero-forge/actions is pinned by a
-# bare commit, which this does not move, and agent-board's commit in
-# .github/poll/agent-board.json is not an action: both are moved by hand.
+# Moves the commit pins of third-party actions daily (#544). Our own
+# actions are followed at main; our wrappers are pinned by commit, which
+# moves by hand with the broker's admission.
 version: 2
 updates:
   - package-ecosystem: github-actions

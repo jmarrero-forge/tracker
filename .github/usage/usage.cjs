@@ -31,10 +31,12 @@ const MIN_PACED_WINDOW_MS = DAY_MS;
 // Bounds on what is read and written: the broker answers in well under a
 // kilobyte, and GitHub takes comments of up to 65536 characters.
 const BROKER_TIMEOUT_MS = 10e3;
+const GITHUB_TIMEOUT_MS = 30e3;
 const MAX_BROKER_BYTES = 256 * 1024;
 const MAX_BODY_CHARS = 32 * 1024;
 // The review app reads the first page of the issue's comments, this long.
 const COMMENT_PAGE = 100;
+const FRESH_MS = 10 * MINUTE_MS;
 
 const REPO_RE = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/;
 const LOGIN_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
@@ -109,7 +111,9 @@ function poolPace(reading, { target, burst }, now) {
     next = Math.max(next || 0, ...spent.map(w => w.resets_at));
   }
   return {
-    source: reading.source, observed_at: iso(finite(reading.observed_at) ? reading.observed_at : now),
+    // A recent short-window header must not make the weekly number look fresh.
+    source: reading.source, observed_at: iso(finite(paced.observed_at) ? paced.observed_at : reading.observed_at),
+    computed_at: iso(now),
     used_percent: paced.used_percent, window_minutes: paced.window_ms / MINUTE_MS, resets_at: iso(paced.resets_at),
     target_percent: goal, burst, allowed_percent: allowed, ahead: paced.used_percent - allowed,
     hold, reason, next_dispatch_at: next === null ? null : iso(next),
@@ -156,7 +160,7 @@ function mistralUsage(broker, pool, now) {
   // usage in the answer) have no tokens in tokens.
   const requests = (counts.requests || 0) + (counts.unmetered || 0);
   if (![requests, counts.tokens.total].every(finite)) return null;
-  const out = { requests, tokens: counts.tokens.total };
+  const out = { requests, tokens: counts.tokens.total, observed_at: iso(now) };
   if (finite(broker.started_at)) out.since = iso(broker.started_at * 1e3);
   const allowance = mistralAllowance(pool, broker, now);
   if (allowance) out.allowance = allowance;
@@ -225,6 +229,18 @@ function previousSnapshot(body) {
   }
 }
 
+// Only skip a join when every configured paced pool has a recent observation.
+// A newer envelope (or short-window header) cannot freshen a weekly reading.
+async function needsPublish({ config, request, now }) {
+  const comments = await request('GET', `/repos/${config.repo}/issues/${config.issue}/comments?per_page=${COMMENT_PAGE}`);
+  const previous = previousSnapshot(findComment(comments, config.bot)?.body);
+  return !Object.keys(config.pacing).every(name => {
+    const observed = previous?.pools?.[name]?.observed_at;
+    const age = now - (typeof observed === 'string' ? Date.parse(observed) : NaN);
+    return Number.isFinite(age) && age >= 0 && age < FRESH_MS;
+  });
+}
+
 // carryPools(snap, previous, config, now): snap, with each pool it has no
 // reading of taken from the previous snapshot, paced again, while that
 // one's window has yet to reset. The broker keeps its readings in memory
@@ -261,13 +277,10 @@ async function publish({ config, snap, render, request, log }) {
   const comments = await request('GET', `/repos/${config.repo}/issues/${config.issue}/comments?per_page=${COMMENT_PAGE}`);
   const existing = findComment(comments, config.bot);
   if (!existing && comments.length >= COMMENT_PAGE) throw new Error(`no usage comment of ${config.bot} among the first ${COMMENT_PAGE} on ${where}, where the review app reads it`);
+  // Written even with neither pool: a pool is only null here once the last
+  // published window has reset, and leaving the comment would keep that
+  // window's hold and hide fresh Mistral counters.
   const carried = carryPools(snap, previousSnapshot(existing?.body), config, Date.parse(snap.updated_at));
-  // The review app drops a snapshot with neither pool, Mistral's counters
-  // with it: the last one, whose time shows its age, is worth more.
-  if (Object.values(carried.pools).every(p => !p)) {
-    log(`no pool reading; ${where} left as it was`);
-    return;
-  }
   const body = render(carried);
   if (existing) {
     await request('PATCH', `/repos/${config.repo}/issues/comments/${existing.id}`, { body });
@@ -285,18 +298,26 @@ async function publish({ config, snap, render, request, log }) {
 
 const API = 'https://api.github.com';
 
-async function request(token, method, path, body) {
-  const res = await fetch(API + path, {
-    method,
-    headers: {
-      authorization: `Bearer ${token}`,
-      accept: 'application/vnd.github+json',
-      'x-github-api-version': '2022-11-28',
-      'user-agent': 'tracker-usage',
-    },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  const text = await res.text();
+// A stalled GitHub connection fails the call rather than holding the job
+// until its timeout, as poll.cjs's request does (#819).
+async function request(token, method, path, body, timeoutMs = GITHUB_TIMEOUT_MS) {
+  let res, text;
+  try {
+    res = await fetch(API + path, {
+      method,
+      headers: {
+        authorization: `Bearer ${token}`,
+        accept: 'application/vnd.github+json',
+        'x-github-api-version': '2022-11-28',
+        'user-agent': 'tracker-usage',
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    text = await res.text();
+  } catch (err) {
+    throw new Error(`${method} ${path}: ${err.cause?.message || err.message}`);
+  }
   if (!res.ok) throw new Error(`${method} ${path}: HTTP ${res.status} ${text.slice(0, 300)}`);
   return text ? JSON.parse(text) : null;
 }
@@ -323,10 +344,18 @@ async function readBroker(base) {
 }
 
 async function main(argv) {
-  const unknown = argv.filter(a => a !== '--dry-run');
-  if (unknown.length) throw new Error(`usage: usage.cjs [--dry-run] (unknown: ${unknown.join(' ')})`);
+  const unknown = argv.filter(a => !['--dry-run', '--check-freshness'].includes(a));
+  if (unknown.length) throw new Error(`usage: usage.cjs [--dry-run | --check-freshness] (unknown: ${unknown.join(' ')})`);
   const dryRun = argv.includes('--dry-run');
+  if (dryRun && argv.includes('--check-freshness')) throw new Error('--dry-run and --check-freshness are mutually exclusive');
   const config = checkConfig(JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')));
+  if (argv.includes('--check-freshness')) {
+    const token = process.env.GH_TOKEN;
+    if (!token) throw new Error(`GH_TOKEN must hold ${config.bot}'s token`);
+    const publish = await needsPublish({ config, request: (...args) => request(token, ...args), now: Date.now() });
+    fs.appendFileSync(process.env.GITHUB_OUTPUT, `publish=${publish}\n`);
+    return;
+  }
   const mistralPool = JSON.parse(fs.readFileSync(POOLS_FILE, 'utf8')).mistral;
   const base = process.env.INFERENCE_URL;
   if (!base) throw new Error('INFERENCE_URL must name the inference broker');
@@ -344,7 +373,7 @@ async function main(argv) {
   await publish({ config, snap, render: s => render(s, workflow), request: (...args) => request(token, ...args), log: console.log });
 }
 
-module.exports = { MARKER, carryPools, checkConfig, claudeReading, findComment, mistralAllowance, mistralUsage, openaiReading, poolPace, previousSnapshot, publish, readBroker, render, snapshot };
+module.exports = { MARKER, carryPools, checkConfig, claudeReading, findComment, mistralAllowance, mistralUsage, needsPublish, openaiReading, poolPace, previousSnapshot, publish, readBroker, render, request, snapshot };
 
 if (require.main === module) {
   main(process.argv.slice(2)).catch(err => { console.error(`usage: ${err.message}`); process.exit(1); });

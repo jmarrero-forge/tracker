@@ -1,0 +1,127 @@
+# The runner configuration of the vibe/GLM child-agent experiment
+# (agentic-job#654): hosted.toml, copied below unchanged (tools.test.cjs
+# holds the copy to it), and then the tables that give the run's agent a
+# second agent, Vibe, to drive over ACP (agentic-job's docs/harness.md, "A
+# second agent"). Only a dispatch that selects it gets it: dispatch.yml's
+# `config` input, `acp-experiment`; every other run keeps hosted.toml and no
+# child.
+
+[sandbox]
+# Daemons of the image that listen for every local user and that an agent
+# run does not use.
+stop-services = [
+    # The runner's user is in docker's group.
+    "docker.socket",
+    "docker.service",
+    "containerd.service",
+    "ssh.socket",
+    "ssh.service",
+    "sshd-unix-local.socket",
+    "snapd.socket",
+    "snapd.service",
+    "multipathd.socket",
+    "multipathd.service",
+    "uuidd.socket",
+    "uuidd.service",
+    "iscsid.socket",
+    "iscsid.service",
+]
+
+[sandbox.check]
+allow-sockets = [
+    # systemd-resolved, which the whole runner resolves names with, the
+    # egress proxy included. It resolves for any user, so on this image
+    # the sandbox user can still send names out through it
+    # (docs/sandbox-check.md).
+    "/run/systemd/resolve/",
+    # systemd-networkd, which the runner's network depends on: it
+    # describes the links to any user and changes them only for root.
+    "/run/systemd/netif/",
+    "/run/systemd/resolve.hook/",
+]
+
+# The egress proxy and the network rules are on by default: no [egress].
+
+[setup]
+# The egress proxy runs in a Python environment of its own, behind
+# nftables rules. Otherwise only what the ubuntu-26.04 image lacks: it has
+# podman and uidmap, which an agent builds containers with, git, curl, tar
+# and unzip, and Node with npm in /usr/local/bin, first on the sandbox
+# user's PATH and where `npm install -g` puts the agent. Ubuntu's npm would
+# add some 350 node-* packages, a minute of setup and a mirror to flake on
+# (#660). Another image may need them back.
+packages = ["python3-venv", "nftables", "just"]
+
+# Uncomment this table only after the wrapper upgrades to the agentic-job
+# release containing #602: v0.2.0 rejects it and would break every dispatch.
+# A moving ref could replace pre-lockdown setup code without review here.
+# API-resolved merge of agenthome#4, also main on 2026-10-14:
+# https://github.com/cgwalters-forge/agenthome/pull/4
+# Runs unprivileged with upstream's bounded fetch/install phases; this does
+# not widen sandbox egress. The installer and dependencies are trusted setup.
+# [setup.tools]
+# repository = "https://github.com/cgwalters-forge/agenthome.git"
+# revision = "9b43eb81e1266ec762a6c49a4e31fb6b4ff3e0e0"
+# recipe = "install-tools"
+
+# The toolchain of each target repository, added to the packages above
+# for a run on it (`default` for any other). It is the caller's choice:
+# nothing is read from the target's own, untrusted, contents
+# (agentic-job's docs/dispatch.md, "Giving runs a toolchain").
+[setup.repo-packages]
+# Ubuntu 26.04's Rust 1.93 (agentic-job needs 1.88) and gcc.
+# No egress rule is added: the proxy lets any GET through, and a
+# `cargo build --locked` only reads, from
+#   index.crates.io   the sparse index
+#   static.crates.io  the crates, checked against Cargo.lock
+#   github.com        git dependencies (git fetch is already allowed)
+# Their build scripts and proc macros run as the sandbox user.
+"jmarrero-forge/tracker" = ["cargo"]
+# The forge's forks of the upstreams. bootc links libostree, glib and zstd
+# and builds with pkg-config and OpenSSL; ostree and rpm-ostree need more
+# than a package list (autotools, a C/C++ build), so they have none yet.
+"jmarrero-forge/bootc" = ["cargo", "pkg-config", "libssl-dev", "libostree-dev", "libglib2.0-dev", "libzstd-dev"]
+
+# The window each broker model is given, which Vibe compacts at three
+# quarters of (agentic-job's docs/harness.md). Without an entry a model gets
+# 32k, compacted at 24k, at which a GLM research task compacted 18 times and
+# lost its findings (agentic-job#821). GLM-5.3 documents 1M, but what the
+# broker's provider serves is unconfirmed, so this stays at 128k until it is.
+[agent.context-windows]
+"zai-glm-5-3" = 131072
+
+# Inert for ordinary runs; read by session runs (session.json). Logins stop
+# other tailnet users prompting the agent; origins stop another website
+# connecting with the operator's tailnet identity. Empty lists fail closed.
+# The login is what `tailscale serve` sends for the operator's untagged
+# devices; a tagged device sends none and is refused.
+[session]
+# None here yet, so session runs fail closed: jmarrero names his tailnet
+# login and the review site's origin before using one.
+operators = []
+origins = []
+# Send a dispatched run the comments made on its item while it works, so
+# the operator's later direction reaches it instead of being lost
+# (agentic-job#1370). They arrive quoted with author and link, as data.
+watch-item = true
+
+[commit]
+author = "agentic-job <agentic-job@users.noreply.github.com>"
+trailers = ["Generated-by: AI"]
+
+# The experiment's own tables; everything above is hosted.toml's.
+
+# The mistral pool's agent and model (pools.json). agentic-job v0.5.0's
+# `sandbox setup` installs Vibe only when the main agent is vibe, so a child
+# under claude or opencode finds none: until upstream installs it for
+# `[child-agent]` too, only the mistral pool's runs can start it.
+[child-agent]
+name = "vibe"
+model = "zai-glm-5-3"
+
+# The cap `config` requires with a child: the proxy counts the requests of
+# both agents under the run's token, while a budget reads only the main
+# agent's reported cost and would leave the child's spending unbounded. The
+# wrapper's `max-requests` input, 400 by default, goes over this value.
+[limits]
+max-requests = 400

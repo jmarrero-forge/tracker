@@ -1,0 +1,6 @@
+{
+  "enabled": false,
+  "repository": "jmarrero-forge/tracker",
+  "issue": 9004,
+  "idleMinutes": 10
+}
