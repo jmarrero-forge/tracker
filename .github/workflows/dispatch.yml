@@ -1,22 +1,27 @@
-# The dispatch caller that `gh workflow run dispatch.yml` starts, and that
-# agent-board's poll and the board scheduler will start once they apply.
-# The run itself is our wrapper's, jmarrero-forge/actions'
-# jmarrero-agentic-job.yml, pinned by commit: it carries the agentic-job
-# pin, the tailnet join, the inference proxy, the runner and the agent. This
-# file keeps what is this repository's: the trigger and its five inputs, the
-# run name, the concurrency, the environment that gates apply and which
-# secret is the apply token; the bounds are in .github/agentic-job
-# (dispatch.toml, fix.toml for `fix`) and the runner configuration in
-# hosted.toml there, the wrapper's default paths.
+# The dispatch caller that `gh workflow run dispatch.yml`, the board
+# scheduler, the epic coordinator and the pull request poll start. The run itself
+# is our wrapper's, jmarrero-forge/actions' jmarrero-agentic-job.yml: it
+# carries the agentic-job pin, the tailnet join, the inference proxy, the
+# runner and the model. This file keeps what is this repository's: the
+# trigger and its five inputs, the run name, the concurrency, the
+# environment that gates apply and which secret is the apply token; the
+# bounds are in .github/agentic-job (dispatch.toml, comment.toml for
+# `triage` and `research`, fix.toml for `fix`) and
+# the runner configuration in hosted.toml there, the wrapper's default paths.
 # The `pool` input picks the agent and model from the closed set in pools.json
 # there; empty leaves them to the repository variables AGENT and AGENT_MODEL.
+# The `config` input picks the runner configuration from a closed set too:
+# `hosted` leaves the wrapper's default, `acp-experiment` is the child-agent
+# experiment's acp-experiment.toml there.
 # Ours too is the standing brief of each kind, profiles/KIND.md there: the
 # `profile` job puts it before the task, so a dispatch carries only what is
 # particular to its item. The wrapper adds its own line on top, which says
 # what the kind may hand back.
-# Adapted from cgwalters-forge/tracker's dispatch.yml.
+# Unlike upstream's, the wrapper is pinned by commit: jmarrero's broker
+# admits a run by its wrapper's commit, so the pin moves with that admission.
+# It sets the agentic-job ref.
 name: dispatch
-run-name: ${{ inputs.kind }} ${{ inputs.repo }}#${{ inputs.item }}${{ inputs.pool && format(' ({0})', inputs.pool) || '' }}
+run-name: ${{ inputs.kind }} ${{ inputs.repo }}#${{ inputs.item }}${{ inputs.pool && format(' ({0})', inputs.pool) || '' }}${{ inputs.config == 'acp-experiment' && ' [acp-experiment]' || '' }}
 
 on:
   workflow_dispatch:
@@ -42,6 +47,11 @@ on:
         description: "Inference pool: claude (.github/agentic-job/pools.json); empty uses the variables AGENT and AGENT_MODEL"
         type: string
         default: ''
+      config:
+        description: "Runner configuration: hosted, the wrapper's default, or acp-experiment, a Vibe child agent for the run's agent to drive (.github/agentic-job/acp-experiment.toml)"
+        type: choice
+        options: [hosted, acp-experiment]
+        default: hosted
 
 permissions: {}
 concurrency:
@@ -62,6 +72,7 @@ jobs:
       model: ${{ steps.pool.outputs.model }}
       budget: ${{ steps.pool.outputs.budget }}
       skilled: ${{ steps.pool.outputs.skilled }}
+      config: ${{ steps.config.outputs.config }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -80,23 +91,38 @@ jobs:
           POOL: ${{ inputs.pool }}
           KIND: ${{ inputs.kind }}
           # The wrapper's fallback without a pool, its default included.
-          AGENT: ${{ vars.AGENT || 'claude' }}
+          AGENT: ${{ vars.AGENT || 'opencode' }}
         run: |
           pools=.github/agentic-job/pools.json
           if [[ -n "$POOL" ]] && ! jq -e --arg pool "$POOL" 'has($pool)' "$pools" > /dev/null; then
             echo "::error::unknown pool '${POOL}'; expected one of: $(jq -r 'keys | join(", ")' "$pools")"
             exit 1
           fi
-          # The wrapper installs agentic-job's skills for claude only
-          # (`skills` below); an agent without them would get the full
-          # profile from the next step. fake reads no task.
+          # The wrapper installs agentic-job's skills for claude and opencode
+          # only (`skills` below); vibe gets none, so the next step gives it
+          # the full profile instead. fake reads no task.
           agent=${POOL:+$(jq -r --arg pool "$POOL" '.[$pool].agent' "$pools")}
           agent=${agent:-$AGENT}
           skilled=false
-          [[ "$agent" =~ ^(claude|fake)$ ]] && skilled=true
+          [[ "$agent" =~ ^(claude|opencode|fake)$ ]] && skilled=true
           echo "skilled=${skilled}" >> "$GITHUB_OUTPUT"
           [[ -z "$POOL" ]] && { printf "agent=\nmodel=\nbudget=\n" >> "$GITHUB_OUTPUT"; exit 0; }
           jq -r --arg pool "$POOL" '.[$pool] | "agent=\(.agent)\nmodel=\(.model)\nbudget=\(.budget)"' "$pools" >> "$GITHUB_OUTPUT"
+      # The runner configuration's path, from the closed set alone: a path
+      # a dispatcher typed could name any file of this repository as the
+      # run's configuration, the bounds files included. Empty for hosted, so
+      # that a normal run's configuration stays the wrapper's default.
+      - name: Resolve the runner configuration
+        id: config
+        env:
+          CONFIG: ${{ inputs.config }}
+        run: |
+          case "$CONFIG" in
+            hosted) path= ;;
+            acp-experiment) path=.github/agentic-job/acp-experiment.toml ;;
+            *) echo "::error::unknown config '${CONFIG}'; expected hosted or acp-experiment"; exit 1 ;;
+          esac
+          echo "config=${path}" >> "$GITHUB_OUTPUT"
       - name: Put the profile before the task
         id: compose
         env:
@@ -108,10 +134,10 @@ jobs:
           [[ "$KIND" =~ ^[a-z]+$ && -s "$profile" ]] ||
             { echo "::error::no profile for kind '${KIND}' (${profile})"; exit 1; }
           # profiles/implement.md says "Use the implement skill" and leaves
-          # the procedure to it. An agent without skills would get no
-          # procedure at all, so it gets KIND-full.md, the profile as it was
-          # before the skill, where one exists. Fix has no skill yet and no
-          # -full file.
+          # the procedure to it. An agent without skills (vibe, from the
+          # mistral pool) would get no procedure at all, so it gets
+          # KIND-full.md, the profile as it was before the skill, where one
+          # exists (#524). Fix has no skill yet and no -full file.
           if [[ "$SKILLED" != true && -s "${profile%.md}-full.md" ]]; then
             profile="${profile%.md}-full.md"
           fi
@@ -126,9 +152,7 @@ jobs:
 
   run:
     needs: profile
-    # 2a2825f is on jmarrero-forge/actions main (merged in #1), the commit
-    # the broker's run-token policy names; move it together with that.
-    uses: jmarrero-forge/actions/.github/workflows/jmarrero-agentic-job.yml@2a2825fa768dc005d067d31484b0899d184732c6
+    uses: jmarrero-forge/actions/.github/workflows/jmarrero-agentic-job.yml@077c8a5675c88bb3771cba65e77e0672f98c1485 # main, agentic-job v0.6.2 (actions#2)
     # The most any job of the wrapper has: its agent job takes the reads and
     # the identity token, its policy and apply calls the comment writes.
     permissions:
@@ -145,20 +169,23 @@ jobs:
       agent: ${{ needs.profile.outputs.agent }}
       model: ${{ needs.profile.outputs.model }}
       budget: ${{ needs.profile.outputs.budget || '500' }}
+      config: ${{ needs.profile.outputs.config }}
       # agentic-job's implement skill and diff-reviewer subagent, so that a
-      # run reviews its own change before it hands it back and
+      # run reviews its own change before it hands it back (#543) and
       # profiles/implement.md need not spell the procedure out. The wrapper
-      # honours it only for implement with claude; fix is asked for too,
-      # but keeps its profile's full text until agentic-job has a fix
-      # skill. Off for an agent without skills, which gets the full profile
-      # instead (the profile job).
+      # honours it only for implement with claude or opencode; fix is asked
+      # for too, but keeps its profile's full text until agentic-job has a
+      # fix skill (its #542). Off for an agent without skills, which gets
+      # the full profile instead (the profile job).
       skills: ${{ needs.profile.outputs.skilled == 'true' && (inputs.kind == 'implement' || inputs.kind == 'fix') }}
       apply-environment: agent-apply
-    # The bot's PAT is a secret of the agent-apply environment alone,
-    # under this name, never a repository or organization secret: named
-    # here, it resolves to nothing outside the environment, so only the
-    # apply job, which runs in it, gets the PAT. The status comments that
-    # would also take it get an empty value and use the job token.
-    # Named, never inherited.
+      # Comment-only kinds have bounds of their own, comment.toml, the only
+      # ones that admit bootc-dev besides fix.toml (D17,
+      # docs/operator-notes.md). The wrapper ignores `allow` for fix and
+      # takes its default fix.toml.
+      allow: ${{ (inputs.kind == 'triage' || inputs.kind == 'research') && '.github/agentic-job/comment.toml' || '.github/agentic-job/dispatch.toml' }}
+    # The bot's token, an organization secret, named and never inherited.
+    # The wrapper hands it to apply, in the environment above, and to the
+    # status comment on an item of another repository; to nothing else.
     secrets:
-      SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
+      SAFE_OUTPUTS_PAT: ${{ secrets.JMARRERO_BOT_PAT }}

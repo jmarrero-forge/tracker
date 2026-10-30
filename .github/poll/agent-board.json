@@ -1,28 +1,32 @@
 {
   "source": "https://github.com/cgwalters-forge/agent-board",
   "branch": "main",
-  "rev": "07de38a6bc6c96e466cd3736a0e2cf5ac2ae02b4",
   "operator": "jmarrero",
+  "operatorComments": { "repositories": ["bootc-dev/*"] },
   "bot": "jmarrero-bot",
   "generatedBy": "https://github.com/jmarrero-bot#llms",
   "mergeAuthors": [],
   "dispatchRepo": "jmarrero-forge/tracker",
   "dispatchWorkflow": "dispatch.yml",
   "reviewWorkflow": "review.yml",
+  "brokerOutage": { "repository": "jmarrero-forge/tracker", "author": "jmarrero-bot", "leadSeconds": 1800 },
   "follow": [
     "jmarrero-forge/tracker",
     "jmarrero-forge/actions",
-    "jmarrero-forge/review",
-    "jmarrero-forge/homegit"
+    "jmarrero-forge/review"
   ],
   "fixPools": ["claude"],
   "toilFixPool": "claude",
-  "kindPools": {},
+  "rebaseRounds": 2,
+  "mergeQueue": { "tries": 3 },
+  "pace": { "repository": "jmarrero-forge/bot-ops", "issue": 1, "bot": "jmarrero-bot", "marginPercent": 95 },
+  "kindPools": { "triage": "claude", "research": "claude" },
   "epics": {
     "repository": "jmarrero-forge/tracker"
   },
   "coordinator": {
-    "planPool": "claude",
+    "reviewUrl": "https://jmarrero-forge.github.io/review/#",
+    "planPool": "tier-1",
     "statusPool": "claude",
     "statusIssue": 1,
     "statusHourUTC": 11
@@ -31,13 +35,16 @@
     "owner": "jmarrero-forge",
     "project": 1,
     "wip": 2,
+    "batch": 2,
+    "triage": 1,
+    "triagePool": "tier-1",
+    "fill": 0,
+    "operatorRetryPools": ["tier-1"],
     "priorityField": "Priority",
-    "triagePerPass": 1,
     "repositories": [
       "jmarrero-forge/tracker",
       "jmarrero-forge/actions",
-      "jmarrero-forge/review",
-      "jmarrero-forge/homegit"
+      "jmarrero-forge/review"
     ]
   }
 }

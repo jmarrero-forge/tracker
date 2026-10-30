@@ -1,8 +1,7 @@
-# Every action and reusable workflow of another repository, our own
-# jmarrero-forge/actions included, is pinned by commit: zizmor's hash-pin
-# for all of them.
+# Our own actions are followed at main (#544), and our wrappers may be
+# pinned by commit; everything else keeps zizmor's default, a pin by commit.
 rules:
   unpinned-uses:
     config:
       policies:
-        "*": hash-pin
+        jmarrero-forge/*: ref-pin

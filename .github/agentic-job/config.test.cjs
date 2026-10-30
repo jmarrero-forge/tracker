@@ -1,0 +1,177 @@
+const assert = require('node:assert/strict');
+const { execFileSync, spawnSync } = require('node:child_process');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { test } = require('node:test');
+
+const read = name => fs.readFileSync(path.join(__dirname, name), 'utf8');
+const hosted = read('hosted.toml');
+const experiment = read('acp-experiment.toml');
+const dispatch = read('../workflows/dispatch.yml');
+const MARKER = "# The experiment's own tables; everything above is hosted.toml's.\n";
+
+test('acp-experiment.toml is hosted.toml and a child agent, and hosted.toml has none', () => {
+  const body = text => text.slice(text.indexOf('[sandbox]\n'));
+  const [copy, own] = body(experiment).split(MARKER);
+  assert.ok(own, 'the marker before the experiment\'s own tables');
+  assert.equal(copy, `${body(hosted)}\n`, 'acp-experiment.toml must keep hosted.toml unchanged');
+  assert.doesNotMatch(hosted, /^\[child-agent\]/m);
+  assert.match(own, /^\[child-agent\]\nname = "vibe"\nmodel = "zai-glm-5-3"\n/m);
+  assert.match(own, /^\[limits\]\nmax-requests = 400\n/m);
+  // Every run on the mistral pool, main agent or child, gets GLM a window
+  // well over Vibe's 32k default (#651); the copy above holds both files to it.
+  assert.match(hosted, /^\[agent\.context-windows\]\n"zai-glm-5-3" = 131072\n/m);
+  // The child's model is upstream's mistral pool's. This deployment has no
+  // mistral pool (its broker serves Claude only), so dispatching
+  // acp-experiment here fails at the broker; the file stays upstream's.
+  assert.equal(require('./pools.json').mistral, undefined);
+});
+
+// Pool settings may name a tier for its automatic pools (tracker#837), so
+// every pool has one; fable's allowance is apart, so only a person spends it.
+test('every pool has a tier, and tier-1 and tier-2 each an automatic pool', () => {
+  const pools = require('./pools.json');
+  for (const [name, pool] of Object.entries(pools)) {
+    assert.ok([1, 2].includes(pool.tier), `${name}.tier`);
+    assert.ok(pool.auto === undefined || typeof pool.auto === 'boolean', `${name}.auto`);
+  }
+  const tier = n => Object.keys(pools).filter(p => pools[p].tier === n && pools[p].auto !== false);
+  // This deployment's broker serves Claude only: no tier 2 yet.
+  assert.deepEqual(tier(1), ['claude']);
+  assert.deepEqual(tier(2), []);
+});
+
+test('dispatch passes the run only a configuration from its closed set', () => {
+  assert.deepEqual(dispatch.match(/^ {6}config: .*$/gm), ['      config: ${{ steps.config.outputs.config }}', '      config: ${{ needs.profile.outputs.config }}']);
+  assert.match(dispatch, /^ {8}type: choice\n {8}options: \[hosted, acp-experiment\]\n {8}default: hosted$/m);
+  const step = /^ {6}- name: Resolve the runner configuration\n(?: {8}.*\n)*? {8}run: \|\n((?:(?: {10}.*)?\n)+)/m.exec(dispatch)?.[1];
+  assert.ok(step);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'config-'));
+  const resolve = (config, n) => {
+    const out = path.join(dir, String(n));
+    fs.writeFileSync(out, '');
+    const r = spawnSync('bash', ['-eo', 'pipefail', '-c', step.replace(/^ {10}/gm, '')], {
+      cwd: path.join(__dirname, '../..'), stdio: 'pipe', env: { ...process.env, CONFIG: config, GITHUB_OUTPUT: out },
+    });
+    return r.status === 0 ? fs.readFileSync(out, 'utf8') : null;
+  };
+  // A normal dispatch leaves the wrapper its default, hosted.toml.
+  assert.equal(resolve('hosted', 0), 'config=\n');
+  assert.equal(resolve('acp-experiment', 1), 'config=.github/agentic-job/acp-experiment.toml\n');
+  assert.ok(fs.existsSync(path.join(__dirname, 'acp-experiment.toml')));
+  for (const [n, config] of ['', 'dispatch.toml', '.github/agentic-job/dispatch.toml', 'hosted acp-experiment'].entries()) {
+    assert.equal(resolve(config, n + 2), null, config);
+  }
+});
+
+// The check the wrapper's policy job makes, with the settings it adds for a
+// real agent; where agentic-job is not installed (CI) it is skipped.
+const agenticJob = spawnSync('agentic-job', ['--version'], { stdio: 'pipe' }).status === 0;
+
+test('supervisor config preserves hosted sandbox and enables only item watching', { skip: !agenticJob && 'agentic-job is not installed' }, () => {
+  const check = file => execFileSync('agentic-job', ['config', '--from', path.join(__dirname, file), '--host'], { encoding: 'utf8' });
+  const supervisor = check('supervisor.toml');
+  const base = check('hosted.toml');
+  for (const table of ['sandbox', 'sandbox.check', 'setup']) {
+    const section = text => text.split(`[${table}]\n`)[1].split('\n[')[0];
+    assert.equal(section(supervisor), section(base));
+  }
+  assert.match(supervisor, /\[session\]\nwatch-item = true/);
+  assert.doesNotMatch(supervisor, /listen = true/);
+});
+
+test('agentic-job config takes acp-experiment.toml, and refuses it without the cap', { skip: !agenticJob && 'agentic-job is not installed' }, () => {
+  const check = file => spawnSync('agentic-job', ['config', '--from', file, '--repo', 'o/r',
+    '--string', 'agent.name=claude', '--string', 'agent.model=m',
+    '--string', 'inference.url=http://127.0.0.1:18080', '--string', 'inference.register=github-oidc',
+    '--string', 'inference.audience=a', '--integer', 'limits.timeout-minutes=75', '--integer', 'limits.budget=500'], { stdio: 'pipe' });
+  const ok = check(path.join(__dirname, 'acp-experiment.toml'));
+  assert.equal(ok.status, 0, String(ok.stderr));
+  assert.match(String(ok.stdout), /^\[child-agent\]\nmodel = "zai-glm-5-3"\nname = "vibe"$/m);
+  assert.match(String(ok.stdout), /^\[agent\.context-windows\]\nzai-glm-5-3 = 131072$/m);
+  // `config` allows up to GLM-5.3's documented 1M (1,048,576) and no more.
+  const wide = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'config-')), 'wide.toml');
+  fs.writeFileSync(wide, experiment.replace(/^"zai-glm-5-3" = 131072$/m, '"zai-glm-5-3" = 1048577'));
+  const refused = check(wide);
+  assert.notEqual(refused.status, 0);
+  assert.match(String(refused.stderr), /agent\.context-windows: "zai-glm-5-3" = 1048577, not a number from 1 to 1048576/);
+  const uncapped = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'config-')), 'uncapped.toml');
+  fs.writeFileSync(uncapped, experiment.replace(/^max-requests = 400\n/m, ''));
+  assert.match(String(check(uncapped).stderr), /child-agent needs limits\.max-requests/);
+  assert.equal(execFileSync('agentic-job', ['config', '--from', path.join(__dirname, 'hosted.toml'), '--repo', 'o/r',
+    '--string', 'agent.name=fake', '--integer', 'limits.timeout-minutes=75', '--boolean', 'limits.uncapped=true']).includes('child-agent'), false);
+});
+
+// Without `ready_when_complete` apply opens every pull request as a draft,
+// and the poll stops on each as "a draft with no checkpoint" (#646). The
+// other fields of each entry stay as they were.
+const outputs = name => read(name).split('[outputs]\n')[1].split(/^\[/m)[0];
+
+test('dispatch and fix have the same targets and workflow-edit bounds', () => {
+  const lists = name => [...read(name).matchAll(/^repos = (\[.*\])$/gm)].map(m => JSON.parse(m[1]));
+  const dispatchLists = lists('dispatch.toml');
+  const fixLists = lists('fix.toml');
+  for (const [name, bounds] of [['dispatch', dispatchLists], ['fix', fixLists]]) {
+    assert.equal(bounds.length, 2, name);
+  }
+  // Less bootc-dev/*, which fix has and dispatch has not (D17, below).
+  for (let i = 0; i < 2; i++) assert.deepEqual([...dispatchLists[i]].sort(), fixLists[i].filter(r => r !== 'bootc-dev/*').sort());
+});
+
+test('dispatch.toml and fix.toml open complete work ready', () => {
+  assert.match(outputs('dispatch.toml'), /^create_pull_request = \{ max = 1, ready_when_complete = true \}$/m);
+  assert.match(outputs('fix.toml'), /^push_to_pull_request_branch = \{ max = 1, branches = \["dispatch\/\*\*", "bot\/\*\*", "release-train\/\*\*"\], replacement_max_commits = 5, ready_when_complete = true \}$/m);
+});
+
+// As upstream has it (its D17): bootc-dev is open to comment-only kinds and to
+// fix, and to nothing else; comment.toml is dispatch.toml's targets with no
+// pull request.
+const repos = name => JSON.parse(/^repos = (\[.*\])$/m.exec(read(name).split(/^\[/m)[0])[1]);
+test('only triage, research and fix may target bootc-dev', () => {
+  assert.deepEqual(repos('comment.toml'), [...repos('dispatch.toml'), 'bootc-dev/*']);
+  assert.deepEqual(repos('fix.toml').filter(r => r.startsWith('bootc-dev')), ['bootc-dev/*']);
+  assert.ok(!repos('dispatch.toml').some(r => r.startsWith('bootc-dev')));
+  assert.deepEqual([...outputs('comment.toml').matchAll(/^([a-z_]+) = /gm)].map(m => m[1]),
+    ['add_comment', 'noop', 'missing_tool', 'missing_data']);
+  assert.doesNotMatch(read('comment.toml'), /^\[unprotected_files\]/m);
+  for (const name of ['dispatch.toml', 'fix.toml']) assert.doesNotMatch(read(name).split(/^\[unprotected_files\]$/m)[1], /bootc-dev/);
+  assert.deepEqual(dispatch.match(/^ {6}allow: .*$/gm), [
+    "      allow: ${{ (inputs.kind == 'triage' || inputs.kind == 'research') && '.github/agentic-job/comment.toml' || '.github/agentic-job/dispatch.toml' }}",
+  ]);
+});
+
+test('agentic-job policy admits bootc-dev only for comments and fixes', { skip: !agenticJob && 'agentic-job is not installed' }, () => {
+  const policy = (file, kind, outputs, ...args) => spawnSync('agentic-job', ['policy', '--allow', path.join(__dirname, file),
+    '--repo', 'bootc-dev/bootc', '--clone-url', 'https://github.com/bootc-dev/bootc',
+    '--kind', kind, '--outputs', outputs, '--max-outputs', '3', ...args], { stdio: 'pipe' }).status;
+  assert.equal(policy('comment.toml', 'analysis', 'add_comment,noop', '--base', 'main'), 0);
+  assert.notEqual(policy('comment.toml', 'branch', 'create_pull_request,noop', '--base', 'main'), 0);
+  assert.notEqual(policy('dispatch.toml', 'analysis', 'add_comment,noop', '--base', 'main'), 0);
+  assert.notEqual(policy('dispatch.toml', 'branch', 'create_pull_request,noop', '--base', 'main'), 0);
+  const fix = (repo, branch) => spawnSync('agentic-job', ['policy', '--allow', path.join(__dirname, 'fix.toml'),
+    '--repo', repo, '--clone-url', `https://github.com/${repo}`, '--kind', 'branch',
+    '--outputs', 'push_to_pull_request_branch,noop', '--max-outputs', '3', '--base', branch, '--pull-request', '1',
+    '--head', '0'.repeat(40), '--output-repo', repo], { stdio: 'pipe' }).status;
+  // The bot's dispatch branches, and the homegit era's bot/** ones (#710),
+  // in bootc-dev and in the midstream forks; no other branch pattern.
+  for (const repo of ['bootc-dev/bootc', 'jmarrero-forge/bootc', 'jmarrero-forge/ostree']) {
+    for (const branch of ['dispatch/x', 'bot/install-output', 'bot/a/b']) assert.equal(fix(repo, branch), 0, `${repo} ${branch}`);
+    for (const branch of ['main', 'feature/x', 'BOT/x', 'bots/x', 'x/bot/y']) assert.notEqual(fix(repo, branch), 0, `${repo} ${branch}`);
+  }
+  // Another owner's bootc or composefs-rs is no target, even on bot/**.
+  // This is the target, not a pull request's head repository: the policy is
+  // never told the head, which apply bounds instead (fix.toml's comment on
+  // `bot/**`), so no test here can refuse a head owner.
+  for (const repo of ['someone/bootc', 'jmarrero-bot/bootc', 'containers/composefs-rs']) assert.notEqual(fix(repo, 'bot/x'), 0, repo);
+});
+
+// The policy job's own reading of the bounds, so a spelling it ignores fails.
+test('agentic-job policy keeps ready_when_complete from both bounds', { skip: !agenticJob && 'agentic-job is not installed' }, () => {
+  const policy = (file, type, ...args) => JSON.parse(execFileSync('agentic-job', ['policy', '--allow', path.join(__dirname, file),
+    '--repo', 'jmarrero-forge/tracker', '--clone-url', 'https://github.com/jmarrero-forge/tracker',
+    '--kind', 'branch', '--outputs', `${type},noop`, '--max-outputs', '3', ...args], { encoding: 'utf8' }));
+  assert.equal(policy('dispatch.toml', 'create_pull_request', '--base', 'main').safe_outputs.create_pull_request.ready_when_complete, true);
+  assert.equal(policy('fix.toml', 'push_to_pull_request_branch', '--base', 'dispatch/x', '--pull-request', '1',
+    '--head', '0'.repeat(40), '--output-repo', 'jmarrero-forge/tracker').safe_outputs.push_to_pull_request_branch.ready_when_complete, true);
+});

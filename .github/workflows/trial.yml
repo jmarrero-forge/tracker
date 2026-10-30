@@ -11,7 +11,7 @@
 # `implement` writes DISPATCH-TRIAL.md and opens one draft pull request
 # here from jmarrero-bot's fork, jmarrero-bot/tracker, which apply creates
 # if missing and pushes the branch to, with Actions turned off there: it
-# needs the agent-apply environment and its SAFE_OUTPUTS_PAT secret. `triage` and `research` post one canned comment
+# needs the agent-apply environment and the JMARRERO_BOT_PAT secret. `triage` and `research` post one canned comment
 # on the issue, and `review` one scripted verdict on an open pull request,
 # with the job token alone. Close the trial pull request, and delete its
 # branch in the fork and the trial comments, when done.
@@ -86,13 +86,14 @@ jobs:
   run:
     needs: target
     uses: cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@db6f8e67b0855ba342c3f32a7083b4243a8ae995 # v0.6.3
-    # The bot's PAT is a secret of the agent-apply environment alone, which
-    # only implement's apply job enters (`apply-environment` below), the
-    # one kind that pushes (to the bot's fork) and opens a pull request.
+    # The bot's PAT, JMARRERO_BOT_PAT, goes to apply, in the agent-apply
+    # environment that only implement's apply job enters (`apply-environment`
+    # below), the one kind that pushes (to the bot's fork) and opens a pull
+    # request.
     # The other kinds, and every status comment, write here with the job
     # token. Named, never inherited.
     secrets:
-      SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
+      SAFE_OUTPUTS_PAT: ${{ secrets.JMARRERO_BOT_PAT }}
     permissions:
       # Agent, policy and check downscope to read. Apply and refusal
       # reporting use these writes; neither executes agent-produced code.
