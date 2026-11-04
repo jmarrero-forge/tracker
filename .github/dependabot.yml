@@ -1,7 +1,7 @@
-# Moves the commit pins of third-party actions daily, those whose release
-# tag is in a comment beside the pin. jmarrero-forge/actions is pinned by a
-# bare commit, which this does not move, and agent-board's commit in
-# .github/poll/agent-board.json is not an action: both are moved by hand.
+# Moves the commit pins of third-party actions daily (#544). Our own
+# actions are followed at main; our wrappers are pinned by commit, which
+# moves by hand with the broker's admission. Also
+# moves the locked crates of the config test.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -10,5 +10,15 @@ updates:
       interval: daily
     # A release has a week to be found compromised and pulled before a pin
     # moves to it.
+    cooldown:
+      default-days: 7
+  # The config test crate's two dev-dependencies, in one pull request.
+  - package-ecosystem: cargo
+    directory: /.github/agentic-job/config-test
+    schedule:
+      interval: daily
+    groups:
+      config-test:
+        patterns: ["*"]
     cooldown:
       default-days: 7

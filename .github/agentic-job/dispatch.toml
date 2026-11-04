@@ -1,30 +1,60 @@
 # Bounds for dispatch.yml: the repositories a dispatched run may target.
 # Exact names, no globs; add a repository here before dispatching to it.
-# The bot's own repositories in jmarrero-forge, and the forge's forks of
-# the upstreams it works on; a run's pull request comes from jmarrero-bot's
-# fork of the target.
+# The forge's forks of the upstreams the bot works on are not listed here:
+# their bounds are midstream.toml, which dispatch.yml picks for them, so
+# that every pull request there stays a draft (#336 upstream).
+# homegit is a target by hand only: the pass does not schedule it.
+# The private jmarrero-forge/bot-ops stays no target: a run
+# dispatched here publishes its transcript and outputs in this public
+# repository (agentic-job's docs/private-repositories.md), the policy job
+# refuses a private target and the wrapper a private caller. A private
+# target would need a dispatch workflow and agent job in bot-ops itself.
 hosts = ["github.com"]
-repos = ["jmarrero-forge/tracker", "jmarrero-forge/actions", "jmarrero-forge/review", "jmarrero-forge/homegit", "jmarrero-forge/bootc", "jmarrero-forge/ostree", "jmarrero-forge/rpm-ostree"]
+repos = ["jmarrero-forge/tracker", "jmarrero-forge/actions", "jmarrero-forge/homegit"]
 bases = ["main"]
 max_outputs = 3
 max_patch_bytes = 1048576
 max_patch_files = 50
 
+# `[outputs]` and review.toml's `[trigger]`, not upstream's `[github.*]` tables:
+# our wrappers run agentic-job v0.6.2, which reads only this form.
 [outputs]
-create_pull_request = { max = 1 }
+# `ready_when_complete`: apply opens complete work ready for review and only
+# a checkpoint or a run stopped at a limit as a draft (agentic-job's
+# docs/safe-outputs.md, "Ready or draft"). Without it every pull request is
+# a draft and the poll stops on each as "a draft with no checkpoint" (#646).
+# config-test/ keeps it set, here and in fix.toml, and unset in the
+# midstream bounds.
+create_pull_request = { max = 1, ready_when_complete = true }
 add_comment = { max = 1 }
 noop = { max = 1 }
 missing_tool = { max = 1 }
 missing_data = { max = 1 }
 
-# Pull requests (implement) may edit `.github/` and AGENTS.md only in the
-# repositories listed here, and none is yet. The prerequisites are in
-# agentic-job's docs/safe-outputs.md: a repository is listed only once a
-# ruleset on its main requires an approving review with stale approvals
-# dismissed on push, and code owner review for `.github/`, since that
-# review is the only gate on a run's `.github/` edit there. Exact names,
-# no globs; fix.toml keeps the same list.
+# Pull requests (implement) may edit `.github/` in these repositories
+# and no other; a fix's push may too, where fix.toml lists them. Exact names, no globs. The
+# prerequisites are in agentic-job's docs/safe-outputs.md. `files` also lets them
+# edit AGENTS.md, a protected file by default, there.
 [unprotected_files]
+# None yet: a repository is listed only once a ruleset on its main requires
+# an approving review with stale approvals dismissed on push, since that
+# review is the only gate on a run's `.github/` edit there
+# (jmarrero-forge/tracker#41). fix.toml keeps the same list.
 repos = []
-files = []
-dot_folders = []
+# README.md too: a docs run there is refused otherwise (cgwalters-forge/agent-board#49).
+# And every other name on agentic-job's default protected list, by the
+# operator's decision (21 Oct): a blocked manifest or lockfile meant a run
+# handed back a change CI couldn't build and a person had to land it
+# (agentic-job#1450). The same review gates these as gates `.github/`, and
+# each repository's review task checks dependency changes as supply chain.
+files = ["AGENTS.md", "README.md", "package.json", "bun.lockb",
+  "bunfig.toml", "deno.json", "deno.jsonc", "deno.lock", "global.json",
+  "NuGet.Config", "Directory.Packages.props", "mix.exs", "mix.lock",
+  "go.mod", "go.sum", "stack.yaml", "stack.yaml.lock", "pom.xml",
+  "build.gradle", "build.gradle.kts", "settings.gradle",
+  "settings.gradle.kts", "gradle.properties", "package-lock.json",
+  "yarn.lock", "pnpm-lock.yaml", "npm-shrinkwrap.json", "requirements.txt",
+  "Pipfile", "Pipfile.lock", "pyproject.toml", "setup.py", "setup.cfg",
+  "Gemfile", "Gemfile.lock", "uv.lock", "CODEOWNERS", "DESIGN.md",
+  "CONTRIBUTING.md", "SECURITY.md", "CODE_OF_CONDUCT.md", "CLAUDE.md"]
+dot_folders = [".github"]

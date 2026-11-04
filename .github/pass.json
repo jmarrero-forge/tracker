@@ -1,0 +1,19 @@
+{
+  "operator": "jmarrero",
+  "bot": "jmarrero-bot",
+  "dispatchRepo": "jmarrero-forge/tracker",
+  "dispatchWorkflow": "dispatch.yml",
+  "dispatchRef": "main",
+  "board": {"owner": "jmarrero-forge", "project": 1},
+  "workRepositories": [
+    "jmarrero-forge/tracker",
+    "jmarrero-forge/bootc",
+    "jmarrero-forge/composefs-rs",
+    "jmarrero-forge/bcvk",
+    "jmarrero-forge/rpm-ostree",
+    "jmarrero-forge/image-builder",
+    "jmarrero-forge/osbuild"
+  ],
+  "wip": 0,
+  "triage": false
+}
