@@ -120,17 +120,16 @@ fn has_word(text: &str, word: &str) -> bool {
     })
 }
 
-/// The `[outputs]` table of a bounds file, as written: upstream's
-/// `[github.outputs]` is newer than the agentic-job v0.6.2 our wrappers run.
+/// The `[github.outputs]` table of a bounds file, as written.
 fn outputs(name: &str) -> String {
     let text = read(name);
     let (_, after) = text
-        .split_once("[outputs]\n")
-        .unwrap_or_else(|| panic!("{name} has no [outputs]"));
+        .split_once("[github.outputs]\n")
+        .unwrap_or_else(|| panic!("{name} has no [github.outputs]"));
     before_table(after).to_owned()
 }
 
-/// The `key = value` lines of an `[outputs]` table, in order.
+/// The `key = value` lines of a `[github.outputs]` table, in order.
 fn output_entries(outputs: &str) -> Vec<(&str, &str)> {
     outputs
         .lines()
@@ -788,14 +787,14 @@ fn workflows_follow_our_own_repositories_at_main_wrappers_excepted_and_pin_the_r
     assert!(seen > 0);
 }
 
-// Both wrappers at the one commit our broker admits (jmarrero/atomic-setup#24);
+// Both wrappers at the one commit our broker admits (jmarrero/atomic-setup#28);
 // upstream's release train moves its pin instead, and we run none.
 #[test]
 fn wrappers_use_the_admitted_pin() {
-    let pin = "jmarrero-review.yml@077c8a5675c88bb3771cba65e77e0672f98c1485 # main, agentic-job v0.6.2 (actions#2)";
+    let pin = "cgwalters-review.yml@3bbed7bfd3c81fc6620fd5f49a5c1bbaf4629e6c # main, agentic-job v0.6.9 (actions#3)";
     assert!(has_line(
         &dispatch(),
-        &format!("    uses: jmarrero-forge/actions/.github/workflows/{}", pin.replace("jmarrero-review", "jmarrero-agentic-job"))
+        &format!("    uses: jmarrero-forge/actions/.github/workflows/{}", pin.replace("cgwalters-review", "cgwalters-agentic-job"))
     ));
     let workflow = read("../workflows/review.yml");
     let pinned = workflow.lines().any(|line| {

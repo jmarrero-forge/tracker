@@ -11,7 +11,7 @@
 # `implement` writes DISPATCH-TRIAL.md and opens one draft pull request
 # here from jmarrero-bot's fork, jmarrero-bot/tracker, which apply creates
 # if missing and pushes the branch to, with Actions turned off there: it
-# needs the agent-apply environment and its SAFE_OUTPUTS_PAT secret. `triage` and `research` post one canned comment
+# needs the agent-apply environment and the JMARRERO_BOT_PAT secret. `triage` and `research` post one canned comment
 # on the issue, and `review` one scripted verdict on an open pull request,
 # with the job token alone. Close the trial pull request, and delete its
 # branch in the fork and the trial comments, when done.
@@ -85,14 +85,15 @@ jobs:
 
   run:
     needs: target
-    uses: cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@732db8c24295ee8d4a79de19f588e6f871d35fe0 # v0.6.4
-    # The bot's PAT is a secret of the agent-apply environment alone, which
-    # only implement's apply job enters (`apply-environment` below), the
-    # one kind that pushes (to the bot's fork) and opens a pull request.
-    # The other kinds, and every status comment, write here with the job
-    # token. Named, never inherited.
+    uses: cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@57119eeffa17ea41b383cfdaf8370b8abeba8868 # v0.6.9
+    # The bot's token, the organization secret dispatch.yml passes too, for
+    # implement alone: its apply, in the agent-apply environment
+    # (`apply-environment` below), pushes to the bot's fork and opens a pull
+    # request with it. The other kinds write here with the job token, as
+    # agentic-job's own scripted caller passes no token. Named, never
+    # inherited.
     secrets:
-      SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
+      SAFE_OUTPUTS_PAT: ${{ inputs.kind == 'implement' && secrets.JMARRERO_BOT_PAT || '' }}
     permissions:
       # Agent, policy and check downscope to read. Apply and refusal
       # reporting use these writes; neither executes agent-produced code.

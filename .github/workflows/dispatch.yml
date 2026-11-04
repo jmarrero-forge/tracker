@@ -1,6 +1,6 @@
 # The dispatch caller that `gh workflow run dispatch.yml` and the pass
 # (poll.yml) start. The run itself
-# is our wrapper's, jmarrero-forge/actions' jmarrero-agentic-job.yml: it
+# is our wrapper's, jmarrero-forge/actions' cgwalters-agentic-job.yml: it
 # carries the agentic-job pin, the tailnet join, the inference proxy, the
 # runner and the model. This file keeps what is this repository's: the
 # trigger and its five inputs, the run name, the concurrency, the
@@ -183,7 +183,7 @@ jobs:
 
   run:
     needs: profile
-    uses: jmarrero-forge/actions/.github/workflows/jmarrero-agentic-job.yml@077c8a5675c88bb3771cba65e77e0672f98c1485 # main, agentic-job v0.6.2 (actions#2)
+    uses: jmarrero-forge/actions/.github/workflows/cgwalters-agentic-job.yml@3bbed7bfd3c81fc6620fd5f49a5c1bbaf4629e6c # main, agentic-job v0.6.9 (actions#3)
     # The most any job of the wrapper has: its agent job takes the reads and
     # the identity token, its policy and apply calls the comment writes.
     permissions:
@@ -214,11 +214,8 @@ jobs:
       # From the profile job, which says how it picks them.
       allow: ${{ needs.profile.outputs.allow }}
       fix-allow: ${{ needs.profile.outputs.fix-allow }}
-    # Unlike upstream's organization secret, the bot's PAT is a secret of
-    # the agent-apply environment alone, under this name: named here, it
-    # resolves to nothing outside the environment, so only the apply job,
-    # which runs in it, gets the PAT. The status comments that would also
-    # take it get an empty value and use the job token.
-    # Named, never inherited.
+    # The bot's token, an organization secret, named and never inherited.
+    # The wrapper hands it to apply, in the environment above, and to the
+    # status comment on an item of another repository; to nothing else.
     secrets:
-      SAFE_OUTPUTS_PAT: ${{ secrets.SAFE_OUTPUTS_PAT }}
+      SAFE_OUTPUTS_PAT: ${{ secrets.JMARRERO_BOT_PAT }}
