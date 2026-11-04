@@ -2,13 +2,11 @@
 # requests, refreshes usage from the broker, plans and applies the operator's
 # epics, starts board work by Priority, WIP and pace, and derives board
 # Status. The configuration is .github/pass.json on the default branch.
-# Here every pass is a preview (jmarrero-forge/tracker#40): pass.json starts
-# no work and follows nothing, the pass reads with the read-only
-# JMARRERO_BOT_READ_TOKEN, it applies only once the variable PASS_APPLY is
-# `enabled`, whether scheduled or started by hand, and even then its caps
-# take no board or forge step (only `next` would start the following
-# pass). Cutover (#42) moves GH_TOKEN to JMARRERO_BOT_PAT and the caps to
-# upstream's.
+# Ours: the pass applies only while the variable PASS_APPLY is `enabled`,
+# whether scheduled or started by hand (upstream lets a manual `apply=true`
+# through without it), so unsetting PASS_APPLY stops every write
+# (jmarrero-forge/tracker#42). pass.json follows our own repositories and
+# starts no board work yet (`wip` 0); the next lanes are pull requests to it.
 name: poll
 run-name: pass${{ inputs.apply && vars.PASS_APPLY == 'enabled' && ' (apply)' || '' }}
 
@@ -100,9 +98,9 @@ jobs:
       - name: One pass
         timeout-minutes: 18
         env:
-          # The bot's read-only token: it reads the organization's board
-          # and can write nothing. Upstream's is the bot's write token.
-          GH_TOKEN: ${{ secrets.JMARRERO_BOT_READ_TOKEN }}
+          # The bot's token: it reads the organization's board and makes
+          # the pass's writes (upstream's CGWALTERS_BOT_PAT).
+          GH_TOKEN: ${{ secrets.JMARRERO_BOT_PAT }}
           DISPATCH_TOKEN: ${{ github.token }}
           AGENT_BOARD: ${{ runner.temp }}/agent-board/bin/agent-board
           # A scheduled pass applies once the operator sets PASS_APPLY; a
@@ -112,16 +110,15 @@ jobs:
             ${{ vars.PASS_APPLY == 'enabled' && (github.event_name == 'schedule' ||
             (github.event_name == 'workflow_dispatch' && inputs.apply)) && '--apply' || '' }}
         shell: bash
-        # The caps of the preview: no run started and no write step taken
-        # (Status changes included), even with --apply, and the Status stage
-        # refused whole over 25 changes; stderr too, so that the summary
-        # says why a pass failed. Upstream's are 8, 20 and 50.
+        # The caps of the first scheduled passes, until they have been
+        # watched (upstream's); stderr too, so that the summary says why a
+        # pass failed.
         # Dispatch picks one fix bounds file per target, so the pass needs both.
         run: |
           "$AGENT_BOARD" pass --config "$RUNNER_TEMP/pass.json" ${APPLY:+"$APPLY"} \
             --fix-bounds .github/agentic-job/fix.toml \
             --fix-bounds .github/agentic-job/midstream-fix.toml \
-            --max-dispatch 0 --max-writes 0 --max-status-changes 25 2>&1 | tee "$RUNNER_TEMP/pass.log"
+            --max-dispatch 8 --max-writes 20 --max-status-changes 50 2>&1 | tee "$RUNNER_TEMP/pass.log"
       - name: Summary
         if: ${{ !cancelled() }}
         run: |

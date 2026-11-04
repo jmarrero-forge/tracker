@@ -855,19 +855,24 @@ fn the_pass_starts_work_only_where_dispatch_and_fix_runs_may_act_on_known_pools(
     }
 }
 
-// Ours until cutover (jmarrero-forge/tracker#42): the pass starts no work,
-// follows and plans nothing and promotes nothing, and poll.yml's caps take
-// no step even if PASS_APPLY is set, so no pass writes.
+// Ours since cutover (jmarrero-forge/tracker#42): the pass follows our own
+// repositories' pull requests and derives Status, with the bot's write token
+// and upstream's caps, but starts no board work, plans and promotes nothing,
+// and writes nothing unless PASS_APPLY is `enabled`, even when started by
+// hand. Each further lane is a pull request that changes this test.
 #[test]
-fn the_pass_is_a_preview_until_cutover() {
+fn the_pass_follows_our_repositories_only() {
     let pass = json_file("../pass.json");
     assert_eq!(pass["wip"], json!(0));
     assert_eq!(pass["triage"], json!(false));
-    for key in ["follow", "epics", "promote", "pools", "pr", "usage", "holds", "maintain"] {
+    assert_eq!(pass["follow"], json!(["jmarrero-forge/tracker", "jmarrero-forge/actions"]));
+    assert_eq!(pass["pr"]["fixPools"], json!(["claude"]));
+    for key in ["epics", "promote", "pools", "usage", "holds", "maintain"] {
         assert!(pass.get(key).is_none(), "{key}");
     }
     let poll = read("../workflows/poll.yml");
-    assert!(poll.contains(" --max-dispatch 0 --max-writes 0 --max-status-changes 25 "));
-    assert!(poll.contains("GH_TOKEN: ${{ secrets.JMARRERO_BOT_READ_TOKEN }}"));
+    assert!(poll.contains(" --max-dispatch 8 --max-writes 20 --max-status-changes 50 "));
+    assert!(poll.contains("GH_TOKEN: ${{ secrets.JMARRERO_BOT_PAT }}"));
+    assert!(!poll.contains("JMARRERO_BOT_READ_TOKEN"));
     assert!(poll.contains("${{ vars.PASS_APPLY == 'enabled' && (github.event_name == 'schedule' ||"));
 }
