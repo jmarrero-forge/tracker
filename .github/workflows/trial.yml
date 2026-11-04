@@ -16,13 +16,22 @@
 # with the job token alone. Close the trial pull request, and delete its
 # branch in the fork and the trial comments, when done.
 #
-#   gh workflow run trial.yml -R jmarrero-forge/tracker -f kind=implement -f item=20
+# `repo` can only be this repository: agentic-job's policy (v0.6.5 and
+# later) reads `repo`, `item` and `kind` from a dispatch's inputs as the
+# run's target, and refuses a dispatch that has `item` and `kind` but no
+# `repo`.
+#
+#   gh workflow run trial.yml -R jmarrero-forge/tracker -f repo=jmarrero-forge/tracker -f kind=implement -f item=20
 name: trial
 run-name: trial ${{ inputs.kind }} jmarrero-forge/tracker#${{ inputs.item }}
 
 on:
   workflow_dispatch:
     inputs:
+      repo:
+        description: This repository, OWNER/NAME, the only target of a trial
+        type: string
+        required: true
       item:
         description: An issue of this repository (an open pull request's number for review)
         type: string
@@ -56,6 +65,7 @@ jobs:
       - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         id: target
         env:
+          TARGET_REPO: ${{ inputs.repo }}
           TARGET_ITEM: ${{ inputs.item }}
           PROFILE: ${{ inputs.kind }}
           TASK: ${{ inputs.task }}
@@ -63,6 +73,9 @@ jobs:
           script: |
             if (context.ref !== `refs/heads/${context.payload.repository.default_branch}`) {
               throw new Error('The trial must run on the default branch');
+            }
+            if (process.env.TARGET_REPO.toLowerCase() !== `${context.repo.owner}/${context.repo.repo}`.toLowerCase()) {
+              throw new Error(`repo must be this repository, ${context.repo.owner}/${context.repo.repo}`);
             }
             const profile = process.env.PROFILE;
             if (!['implement', 'triage', 'research', 'review'].includes(profile)) {
