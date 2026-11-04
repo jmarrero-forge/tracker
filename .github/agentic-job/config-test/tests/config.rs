@@ -41,53 +41,6 @@ fn dispatch() -> String {
     read("../workflows/dispatch.yml")
 }
 
-#[test]
-fn weekly_blog_passes_deployment_settings_and_partial_to_digest() {
-    let config = json_file("../weekly-digest.json");
-    let board = json_file("../poll/agent-board.json");
-    for key in ["operator", "bot", "follow"] {
-        assert_eq!(config[key], board[key], "{key}");
-    }
-    let pass = json_file("../pass.json");
-    assert_eq!(config["owner"], pass["board"]["owner"]);
-    assert_eq!(config["project"], pass["board"]["project"]);
-    for (key, expected) in [
-        ("siteRepository", json!("cgwalters-forge/cgwalters-forge.github.io")),
-        ("title", json!("Weekly notes: week ending {week}")),
-        ("priority", json!("P0")),
-        ("changesChars", json!(26000)),
-        ("releaseBytes", json!(10000)),
-        ("bodyBytes", json!(56000)),
-        ("dispatchRepository", pass["dispatchRepo"].clone()),
-        ("dispatchWorkflow", json!("dispatch.yml")),
-        ("dispatchRef", json!("main")),
-    ] {
-        assert_eq!(config[key], expected, "{key}");
-    }
-    let workflow = read("../workflows/weekly-blog.yml");
-    for setting in [
-        "GH_TOKEN: ${{ secrets.CGWALTERS_BOT_PAT }}",
-        "DISPATCH_TOKEN: ${{ github.token }}",
-        "PARTIAL: ${{ inputs.partial }}",
-        "vars.WEEKLY_BLOG == 'enabled'",
-        "cancel-in-progress: false",
-    ] {
-        assert!(workflow.contains(setting), "{setting}");
-    }
-    let script = workflow.rsplit_once("        run: |\n").expect("digest step").1;
-    for (partial, suffix) in [("", ""), ("false", ""), ("true", "--partial\n")] {
-        let output = Command::new("bash")
-            .args(["--noprofile", "--norc", "-euo", "pipefail", "-c",
-                &format!("digest_cli() {{ printf '%s\\n' \"$@\"; }}\n{script}")])
-            .env("AGENT_BOARD", "digest_cli")
-            .env("PARTIAL", partial)
-            .output().expect("run digest step with mocked CLI");
-        assert!(output.status.success(), "{output:?}");
-        assert_eq!(String::from_utf8(output.stdout).unwrap(),
-            format!("digest\n--config\n.github/weekly-digest.json\n{suffix}--apply\n"));
-    }
-}
-
 fn profile(name: &str) -> String {
     read(&format!("profiles/{name}.md"))
 }
@@ -167,28 +120,17 @@ fn has_word(text: &str, word: &str) -> bool {
     })
 }
 
-/// Whether `text` contains `parts` in this order.
-fn in_order(text: &str, parts: &[&str]) -> bool {
-    let mut rest = text;
-    parts.iter().all(|p| match rest.find(p) {
-        Some(i) => {
-            rest = &rest[i + p.len()..];
-            true
-        }
-        None => false,
-    })
-}
-
-/// The `[github.outputs]` table of a bounds file, as written.
+/// The `[outputs]` table of a bounds file, as written: upstream's
+/// `[github.outputs]` is newer than the agentic-job v0.6.2 our wrappers run.
 fn outputs(name: &str) -> String {
     let text = read(name);
     let (_, after) = text
-        .split_once("[github.outputs]\n")
-        .unwrap_or_else(|| panic!("{name} has no [github.outputs]"));
+        .split_once("[outputs]\n")
+        .unwrap_or_else(|| panic!("{name} has no [outputs]"));
     before_table(after).to_owned()
 }
 
-/// The `key = value` lines of a `[github.outputs]` table, in order.
+/// The `key = value` lines of an `[outputs]` table, in order.
 fn output_entries(outputs: &str) -> Vec<(&str, &str)> {
     outputs
         .lines()
@@ -342,14 +284,13 @@ fn acp_experiment_is_hosted_and_a_child_agent_and_hosted_has_none() {
     // Every run on the mistral pool, main agent or child, gets GLM a window
     // well over Vibe's 32k default (#651); the copy above holds both files to it.
     assert!(has_lines(&hosted, &["[agent.context-windows]", r#""zai-glm-5-3" = 131072"#]));
-    // The child's model is the mistral pool's, the one dispatch can select.
-    assert_eq!(pools()["mistral"]["model"], "zai-glm-5-3");
 }
 
-// Pool settings may name a tier for its automatic pools (tracker#837), so
-// every pool has one; fable's allowance is apart, so only a person spends it.
+// Pool settings may name a tier for its automatic pools (upstream's
+// tracker#837), so every pool has one. Ours is the Claude pool alone
+// (jmarrero-forge/tracker#43).
 #[test]
-fn every_pool_has_a_tier_and_tier_1_and_tier_2_each_an_automatic_pool() {
+fn every_pool_has_a_tier_and_claude_is_the_only_automatic_pool() {
     let pools = pools();
     for (name, pool) in &pools {
         assert!(matches!(pool["tier"].as_i64(), Some(1 | 2)), "{name}.tier");
@@ -362,9 +303,8 @@ fn every_pool_has_a_tier_and_tier_1_and_tier_2_each_an_automatic_pool() {
             .map(|(name, _)| name.as_str())
             .collect()
     };
-    assert_eq!(tier(1), ["claude", "openai"]);
-    assert_eq!(tier(2), ["mistral"]);
-    assert_eq!([&pools["fable"]["tier"], &pools["fable"]["auto"]], [&json!(1), &json!(false)]);
+    assert_eq!(tier(1), ["claude"]);
+    assert!(tier(2).is_empty());
 }
 
 #[test]
@@ -386,25 +326,6 @@ fn dispatch_passes_the_run_only_a_configuration_from_its_closed_set() {
     for config in ["", "dispatch.toml", ".github/agentic-job/dispatch.toml", "hosted acp-experiment"] {
         assert_eq!(resolve(config), None, "{config}");
     }
-}
-
-// A session dispatch of supervisor.yml lets in session.yml's operators and origins.
-#[test]
-fn supervisor_config_preserves_hosted_sandbox_and_session_without_a_listener() {
-    if !agentic_job_installed() {
-        return;
-    }
-    let check = |file: &str| agentic_job_ok(&["config", "--from", &path_of(file), "--host"]);
-    let supervisor = check("supervisor.toml");
-    let base = check("hosted.toml");
-    for table in ["sandbox", "sandbox.check", "setup", "session"] {
-        let section = |text: &str| {
-            let after = text.split(&format!("[{table}]\n")).nth(1).unwrap_or_else(|| panic!("no [{table}]"));
-            after.split("\n[").next().unwrap_or_default().to_owned()
-        };
-        assert_eq!(section(&supervisor), section(&base), "[{table}]");
-    }
-    assert!(!supervisor.contains("listen = true"));
 }
 
 #[test]
@@ -448,81 +369,17 @@ fn agentic_job_config_takes_acp_experiment_and_refuses_it_without_the_cap() {
 }
 
 #[test]
-fn misctool_is_a_dispatch_and_fix_target_with_matching_workflow_edit_bounds() {
+fn dispatch_and_fix_name_the_same_targets_with_matching_workflow_edit_bounds() {
     let dispatch_lists = lists("dispatch.toml");
     let fix_lists = lists("fix.toml");
     for (name, bounds) in [("dispatch", &dispatch_lists), ("fix", &fix_lists)] {
         assert_eq!(bounds.len(), 2, "{name}");
-        for repos in bounds {
-            assert!(repos.iter().any(|r| r == "cgwalters-forge/misctool"), "{name}");
-        }
     }
     // Less bootc-dev/*, which fix has and dispatch has not (D17, below).
     for i in 0..2 {
         let fix = fix_lists[i].iter().filter(|r| *r != "bootc-dev/*").cloned().collect();
         assert_eq!(sorted(dispatch_lists[i].clone()), sorted(fix));
     }
-}
-
-// forge-infra (#812) is followed and a target, but no run may edit its
-// `.github/` or protected files until a per-repository ruleset is on its
-// main; for now the organization's ruleset is its only gate.
-#[test]
-fn forge_infra_is_a_followed_target_without_unprotected_files() {
-    let repo = "cgwalters-forge/forge-infra";
-    for name in ["dispatch.toml", "fix.toml", "comment.toml"] {
-        assert!(repos(name).iter().any(|r| r == repo), "{name}");
-    }
-    for name in ["dispatch.toml", "fix.toml"] {
-        assert!(!lists(name)[1].iter().any(|r| r == repo), "{name}");
-    }
-    let follow = json_file("../poll/agent-board.json")["follow"].clone();
-    assert!(follow.as_array().expect("agent-board.json's follow").contains(&json!(repo)));
-}
-
-#[test]
-fn atomic_linux_sandbox_is_a_followed_work_target_not_a_midstream_fork() {
-    let repo = "cgwalters-forge/atomic-linux-sandbox";
-    for name in ["dispatch.toml", "fix.toml", "comment.toml"] {
-        assert!(repos(name).iter().any(|r| r == repo), "{name}");
-    }
-    for name in ["midstream.toml", "midstream-fix.toml"] {
-        assert!(!repos(name).iter().any(|r| r == repo), "{name}");
-    }
-    let board = json_file("../poll/agent-board.json");
-    for list in [&board["follow"], &board["schedule"]["repositories"]] {
-        assert!(list.as_array().expect("board repositories").contains(&json!(repo)));
-    }
-    let pass = json_file("../pass.json");
-    for key in ["follow", "workRepositories"] {
-        assert!(pass[key].as_array().expect(key).contains(&json!(repo)), "{key}");
-    }
-    assert!(pass["holds"]["proposals"]["repositories"].as_array().unwrap().contains(&json!(repo)));
-    assert!(!pass["pr"]["noMerge"].as_array().unwrap().contains(&json!(repo)));
-}
-
-// The midstream fork bcvk takes staged pull requests as composefs-rs and
-// bootc do: midstream bounds only, scheduled, followed for fix rounds by the
-// pass but never merged into, since its main tracks upstream.
-#[test]
-fn bcvk_is_a_midstream_target_that_is_never_merged_into() {
-    let repo = "cgwalters-forge/bcvk";
-    for name in ["midstream.toml", "midstream-fix.toml", "comment.toml"] {
-        assert!(repos(name).iter().any(|r| r == repo), "{name}");
-    }
-    for name in ["dispatch.toml", "fix.toml"] {
-        assert!(!repos(name).iter().any(|r| r == repo), "{name}");
-    }
-    let board = json_file("../poll/agent-board.json");
-    assert!(board["schedule"]["repositories"].as_array().expect("schedule.repositories").contains(&json!(repo)));
-    assert!(!board["follow"].as_array().expect("agent-board.json's follow").contains(&json!(repo)));
-    let pass = json_file("../pass.json");
-    for key in ["follow", "workRepositories"] {
-        assert!(pass[key].as_array().expect(key).contains(&json!(repo)), "{key}");
-    }
-    assert!(pass["pr"]["noMerge"].as_array().expect("pr.noMerge").contains(&json!(repo)));
-    let proposals = &pass["holds"]["proposals"]["repositories"];
-    assert!(proposals.as_array().expect("holds.proposals.repositories").contains(&json!(repo)));
 }
 
 // Without `ready_when_complete` apply opens every pull request as a draft,
@@ -537,16 +394,12 @@ fn dispatch_and_fix_open_complete_work_ready() {
     ));
 }
 
-// D17 (docs/operator-notes.md, 2026-10-17): bootc-dev is open to
-// comment-only kinds and to fix, and to nothing else; comment.toml is
-// dispatch.toml's targets with no pull request.
+// Upstream's D17: bootc-dev is open to comment-only kinds and to fix, and
+// to nothing else; comment.toml is dispatch.toml's targets with no pull
+// request. Whether that holds here is jmarrero's decision before the pass
+// applies (jmarrero-forge/tracker#42).
 #[test]
 fn only_triage_research_and_fix_may_target_bootc_dev() {
-    let notes = read("../../docs/operator-notes.md");
-    assert!(notes.lines().any(|l| l.strip_prefix("D17 (which bootc-dev runs ").is_some_and(|rest| in_order(
-        rest,
-        &["**B**. ", "Fix rounds run on the bot's own bootc-dev pull requests", "Triage and research answers may also be posted"]
-    ))));
     let mut expected = [repos("dispatch.toml"), repos("midstream.toml")].concat();
     expected.push("bootc-dev/*".to_owned());
     assert_eq!(sorted(repos("comment.toml")), sorted(expected));
@@ -584,7 +437,7 @@ fn the_midstream_bounds_are_the_others_without_ready_when_complete_and_dispatch_
             })
             .collect()
     };
-    assert_eq!(repos("midstream.toml"), ["cgwalters-forge/composefs-rs", "cgwalters-forge/bootc", "cgwalters-forge/bcvk", "cgwalters-forge/rpm-ostree"]);
+    assert_eq!(repos("midstream.toml"), ["jmarrero-forge/bootc", "jmarrero-forge/composefs-rs", "jmarrero-forge/bcvk", "jmarrero-forge/rpm-ostree", "jmarrero-forge/ostree", "jmarrero-forge/image-builder", "jmarrero-forge/osbuild"]);
     for (midstream, base) in [("midstream.toml", "dispatch.toml"), ("midstream-fix.toml", "fix.toml")] {
         let text = uncommented(&read(midstream));
         assert!(!text.contains("ready_when_complete") && !has_line_starting(&text, "[unprotected_files]"), "{midstream}");
@@ -612,8 +465,8 @@ fn the_midstream_bounds_are_the_others_without_ready_when_complete_and_dispatch_
     let step = step_script("Resolve the bounds");
     // bootc-dev/bootc is upstream, no midstream; neither is a name that only contains one.
     for (repos, allow, fix) in [
-        (&["cgwalters-forge/composefs-rs", "cgwalters-forge/bootc", "cgwalters-forge/BootC", "cgwalters-forge/bcvk", "cgwalters-forge/rpm-ostree"][..], "midstream.toml", "midstream-fix.toml"),
-        (&["cgwalters-forge/tracker", "bootc-dev/bootc", "cgwalters-forge/bootc-x", "cgwalters-forge"][..], "dispatch.toml", "fix.toml"),
+        (&["jmarrero-forge/composefs-rs", "jmarrero-forge/bootc", "jmarrero-forge/BootC", "jmarrero-forge/bcvk", "jmarrero-forge/rpm-ostree", "jmarrero-forge/ostree", "jmarrero-forge/image-builder", "jmarrero-forge/osbuild"][..], "midstream.toml", "midstream-fix.toml"),
+        (&["jmarrero-forge/tracker", "bootc-dev/bootc", "jmarrero-forge/bootc-x", "jmarrero-forge"][..], "dispatch.toml", "fix.toml"),
     ] {
         for repo in repos {
             for kind in KINDS {
@@ -650,7 +503,7 @@ fn agentic_job_policy_admits_bootc_dev_only_for_comments_and_fixes() {
     assert!(!policy("dispatch.toml", "branch", "create_pull_request,noop"));
     let head = "0".repeat(40);
     let fix = |repo: &str, branch: &str| {
-        let bounds = match repo.starts_with("cgwalters-forge/") {
+        let bounds = match repo.starts_with("jmarrero-forge/") {
             true => "midstream-fix.toml",
             false => "fix.toml",
         };
@@ -664,7 +517,7 @@ fn agentic_job_policy_admits_bootc_dev_only_for_comments_and_fixes() {
     };
     // The bot's dispatch branches, and the homegit era's bot/** ones (#710),
     // in bootc-dev and in the midstream forks; no other branch pattern.
-    for repo in ["bootc-dev/bootc", "cgwalters-forge/bootc", "cgwalters-forge/composefs-rs", "cgwalters-forge/bcvk"] {
+    for repo in ["bootc-dev/bootc", "jmarrero-forge/bootc", "jmarrero-forge/composefs-rs", "jmarrero-forge/bcvk"] {
         for branch in ["dispatch/x", "bot/install-output", "bot/a/b"] {
             assert!(fix(repo, branch), "{repo} {branch}");
         }
@@ -676,7 +529,7 @@ fn agentic_job_policy_admits_bootc_dev_only_for_comments_and_fixes() {
     // This is the target, not a pull request's head repository: the policy is
     // never told the head, which apply bounds instead (fix.toml's comment on
     // `bot/**`), so no test here can refuse a head owner.
-    for repo in ["someone/bootc", "cgwalters-bot/bootc", "containers/composefs-rs", "cgwalters-bot/bcvk", "someone/bcvk"] {
+    for repo in ["someone/bootc", "jmarrero-bot/bootc", "containers/composefs-rs", "jmarrero-bot/bcvk", "someone/bcvk"] {
         assert!(!fix(repo, "bot/x"), "{repo}");
     }
 }
@@ -703,8 +556,8 @@ fn agentic_job_policy_keeps_ready_when_complete_from_both_bounds_and_the_midstre
     };
     let head = "0".repeat(40);
     for (repo, allow, fix, expected) in [
-        ("cgwalters-forge/tracker", "dispatch.toml", "fix.toml", true),
-        ("cgwalters-forge/composefs-rs", "midstream.toml", "midstream-fix.toml", false),
+        ("jmarrero-forge/tracker", "dispatch.toml", "fix.toml", true),
+        ("jmarrero-forge/composefs-rs", "midstream.toml", "midstream-fix.toml", false),
     ] {
         assert_eq!(ready(repo, allow, "create_pull_request", &["--base", "main"]), expected, "{allow}");
         let args = ["--base", "dispatch/x", "--pull-request", "1", "--head", &head, "--output-repo", repo];
@@ -714,10 +567,10 @@ fn agentic_job_policy_keeps_ready_when_complete_from_both_bounds_and_the_midstre
 
 #[test]
 fn no_repository_the_bot_owns_is_a_dispatch_or_fix_target_unless_it_opts_in() {
-    let bot = json_file("../poll/agent-board.json")["bot"].as_str().expect("agent-board.json's bot").to_owned();
+    let bot = json_file("../pass.json")["bot"].as_str().expect("pass.json's bot").to_owned();
     // Bot-owned repositories whose default branch has accept-owner-branches
     // naming them, in lowercase; add one only after checking that file is there.
-    let opted_in = BTreeSet::from(["cgwalters-bot/praxis-credential-broker"]);
+    let opted_in: BTreeSet<&str> = BTreeSet::new();
     for name in ["dispatch.toml", "fix.toml"] {
         for repo in repos(name) {
             if opted_in.contains(repo.to_lowercase().as_str()) {
@@ -776,8 +629,6 @@ fn pools_has_what_dispatch_reads_and_a_well_formed_allowance() {
         assert!(currency.len() == 3 && currency.chars().all(|c| c.is_ascii_uppercase()), "{name}.allowance.currency");
         assert_eq!(allowance.get("period"), Some(&json!("calendar-month")));
     }
-    assert_eq!(pools["mistral"]["budget"], "1000");
-    assert_eq!(pools["mistral"]["allowance"], json!({ "amount": 300, "currency": "USD", "period": "calendar-month" }));
 }
 
 #[test]
@@ -871,7 +722,6 @@ fn dispatch_gives_an_agent_without_skills_the_full_implement_profile() {
         }
     }
     let agents: Vec<&str> = pools.values().map(|p| p["agent"].as_str().unwrap_or_default()).collect();
-    assert!(agents.iter().any(|a| !SKILLED_AGENTS.contains(a)));
     assert!(agents.iter().any(|a| SKILLED_AGENTS.contains(a)));
     for agent in ["claude", "opencode", "fake"] {
         assert_eq!(run("", "implement", agent), Some(unpooled("true", expected("implement", true))));
@@ -901,8 +751,8 @@ fn is_commit(rev: &str) -> bool {
 }
 
 #[test]
-fn workflows_follow_our_own_repositories_at_main_review_excepted_and_pin_the_rest() {
-    let dispatch_repo = json_file("../poll/agent-board.json")["dispatchRepo"].as_str().expect("dispatchRepo").to_owned();
+fn workflows_follow_our_own_repositories_at_main_wrappers_excepted_and_pin_the_rest() {
+    let dispatch_repo = json_file("../pass.json")["dispatchRepo"].as_str().expect("dispatchRepo").to_owned();
     let owner = format!("{}/", dispatch_repo.split('/').next().unwrap_or_default());
     let dir = here().join("../workflows");
     let mut seen = 0;
@@ -925,9 +775,10 @@ fn workflows_follow_our_own_repositories_at_main_review_excepted_and_pin_the_res
                 panic!("{file}: uses: must have its value on the same line")
             });
             seen += 1;
-            // Except review.yml: its verdict is the only gate on .github/ here,
-            // so the wrapper it calls moves only by a reviewed change to the pin.
-            let ok = match uses.starts_with(&owner) && file != "review.yml" {
+            // Except the wrappers review.yml and dispatch.yml call: our broker
+            // admits a run by its wrapper's commit, so they move only by a
+            // reviewed change to the pin, with that admission.
+            let ok = match uses.starts_with(&owner) && file != "review.yml" && file != "dispatch.yml" {
                 true => is_ref(uses, |rev| rev == "main"),
                 false => is_ref(uses, is_commit),
             };
@@ -937,20 +788,22 @@ fn workflows_follow_our_own_repositories_at_main_review_excepted_and_pin_the_res
     assert!(seen > 0);
 }
 
-// The release train moves this pin: the commit wherever it stands, and the
-// version after `agentic-job ` plain or escaped as in a pattern
-// (.github/release-train/config.json), so it stays in this form.
+// Both wrappers at the one commit our broker admits (jmarrero/atomic-setup#24);
+// upstream's release train moves its pin instead, and we run none.
 #[test]
-fn review_wrapper_uses_the_release_pin() {
-    let pin = r"cgwalters-review\.yml@1b4539dd00edff3f89cb130e72e535e8d9c6a67a # main, agentic-job v0\.6\.9 \(actions#67\)";
-    let pin = pin.replace('\\', "");
+fn wrappers_use_the_admitted_pin() {
+    let pin = "jmarrero-review.yml@077c8a5675c88bb3771cba65e77e0672f98c1485 # main, agentic-job v0.6.2 (actions#2)";
+    assert!(has_line(
+        &dispatch(),
+        &format!("    uses: jmarrero-forge/actions/.github/workflows/{}", pin.replace("jmarrero-review", "jmarrero-agentic-job"))
+    ));
     let workflow = read("../workflows/review.yml");
     let pinned = workflow.lines().any(|line| {
         let trimmed = line.trim_start();
         trimmed.len() < line.len()
             && trimmed
                 .strip_prefix("uses: ")
-                .and_then(|uses| uses.strip_suffix(&pin))
+                .and_then(|uses| uses.strip_suffix(pin))
                 .and_then(|uses| uses.strip_suffix('/'))
                 .is_some_and(|owner| !owner.is_empty() && !owner.contains(char::is_whitespace))
     });
@@ -962,6 +815,9 @@ fn the_pass_starts_work_only_where_dispatch_and_fix_runs_may_act_on_known_pools(
     let pass = json_file("../pass.json");
     let either = |names: &[&str]| -> Vec<String> { names.iter().flat_map(|n| repos(n)).collect() };
     let names = |v: &Value, what: &str| -> Vec<String> {
+        if v.is_null() {
+            return vec![];
+        }
         v.as_array()
             .unwrap_or_else(|| panic!("{what} is not an array"))
             .iter()
@@ -976,7 +832,7 @@ fn the_pass_starts_work_only_where_dispatch_and_fix_runs_may_act_on_known_pools(
     for repo in names(&pass["follow"], "follow") {
         assert!(followed.contains(&repo), "{repo} is followed but not in fix.toml or midstream-fix.toml");
     }
-    let mut used: Vec<String> = pass["pools"].as_object().expect("pass.json's pools").keys().cloned().collect();
+    let mut used: Vec<String> = pass["pools"].as_object().map(|p| p.keys().cloned().collect()).unwrap_or_default();
     for key in ["planPools", "triagePools"] {
         used.extend(names(&pass[key], key));
     }
@@ -995,5 +851,24 @@ fn the_pass_starts_work_only_where_dispatch_and_fix_runs_may_act_on_known_pools(
         assert!(pools.contains_key(&pool), "{pool}");
     }
     assert_eq!(pass["dispatchWorkflow"], "dispatch.yml");
-    assert_eq!(pass["pr"]["reviewWorkflow"], "review.yml");
+    if !pass["pr"].is_null() {
+        assert_eq!(pass["pr"]["reviewWorkflow"], "review.yml");
+    }
+}
+
+// Ours until cutover (jmarrero-forge/tracker#42): the pass starts no work,
+// follows and plans nothing and promotes nothing, and poll.yml's caps take
+// no step even if PASS_APPLY is set, so no pass writes.
+#[test]
+fn the_pass_is_a_preview_until_cutover() {
+    let pass = json_file("../pass.json");
+    assert_eq!(pass["wip"], json!(0));
+    assert_eq!(pass["triage"], json!(false));
+    for key in ["follow", "epics", "promote", "pools", "pr", "usage", "holds", "maintain"] {
+        assert!(pass.get(key).is_none(), "{key}");
+    }
+    let poll = read("../workflows/poll.yml");
+    assert!(poll.contains(" --max-dispatch 0 --max-writes 0 --max-status-changes 25 "));
+    assert!(poll.contains("GH_TOKEN: ${{ secrets.JMARRERO_BOT_READ_TOKEN }}"));
+    assert!(poll.contains("${{ vars.PASS_APPLY == 'enabled' && (github.event_name == 'schedule' ||"));
 }

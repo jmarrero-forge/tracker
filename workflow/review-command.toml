@@ -1,17 +1,17 @@
 # review.toml for `/review`: the same bounds, for a comment by someone who
 # can write, on any pull request, forks included.
 hosts = ["github.com"]
-repos = ["cgwalters-forge/tracker"]
+repos = ["jmarrero-forge/tracker"]
 bases = ["main"]
 max_outputs = 1
 max_patch_bytes = 1024
 max_patch_files = 1
 
-[github.outputs]
+[outputs]
 add_comment = { max = 1 }
 noop = { max = 1 }
 
-[github.trigger]
+[trigger]
 events = ["issue_comment"]
 roles = ["admin", "maintain", "write"]
 bots = []
