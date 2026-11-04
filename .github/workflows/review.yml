@@ -1,6 +1,6 @@
 # An agent's review of every pull request here, through our deployment's
-# review entrypoint, jmarrero-forge/actions' jmarrero-review.yml, which
-# composes agentic-job v0.6.2's review jobs with our tailnet join and
+# review entrypoint, jmarrero-forge/actions' cgwalters-review.yml, which
+# composes agentic-job v0.6.9's review jobs with our tailnet join and
 # inference defaults, and admits PRs as agentic-job's review.yml did
 # (#625). It reads its bounds (workflow/review.toml,
 # workflow/review-command.toml) and its task (workflow/review.md) from
@@ -36,7 +36,7 @@ jobs:
       vars.AGENT_REVIEW != '' && (github.event_name == 'pull_request_target' ||
       (github.event.issue.pull_request && startsWith(github.event.comment.body, '/review')))
     # Base-owned policy; the head is fetched only as data inside the sandbox.
-    uses: jmarrero-forge/actions/.github/workflows/jmarrero-review.yml@077c8a5675c88bb3771cba65e77e0672f98c1485 # main, agentic-job v0.6.2 (actions#2)
+    uses: jmarrero-forge/actions/.github/workflows/cgwalters-review.yml@3bbed7bfd3c81fc6620fd5f49a5c1bbaf4629e6c # main, agentic-job v0.6.9 (actions#3)
     # The union of the wrapper's job grants: statuses for its compatibility
     # status, id-token for the tailnet join. No SAFE_OUTPUTS_PAT: the
     # wrapper gives it only to apply, the comment fallback; real reviews
