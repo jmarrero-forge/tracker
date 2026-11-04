@@ -85,7 +85,7 @@ jobs:
 
   run:
     needs: target
-    uses: cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@db6f8e67b0855ba342c3f32a7083b4243a8ae995 # v0.6.3
+    uses: cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@732db8c24295ee8d4a79de19f588e6f871d35fe0 # v0.6.4
     # The bot's PAT is a secret of the agent-apply environment alone, which
     # only implement's apply job enters (`apply-environment` below), the
     # one kind that pushes (to the bot's fork) and opens a pull request.
