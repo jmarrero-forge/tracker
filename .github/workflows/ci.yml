@@ -17,25 +17,32 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # The tests of the poll scripts, through the Justfile.
+  # The tests of the scripts under .github, through the Justfile.
   test:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    runs-on: ubuntu-26.04
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # The hosted image's Node; the scripts have no dependencies to install.
+      # The hosted image's Node and Rust; the scripts have no dependencies
+      # to install, and test-config's crate fetches its locked ones.
       # A pinned just: Ubuntu's apt carries an old one (1.21 on 24.04).
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
         with:
           just-version: 1.58.0
+      - name: Install the supervisor's verified pinned config validator
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: just build-supervisor-agent-board
       - run: just test
+        env:
+          AGENT_BOARD: ${{ runner.temp }}/agent-board/bin/agent-board
 
   # actionlint, zizmor and the runner-label policy shared by the forge
-  # repositories, at the versions its `just check` recipe pins in
-  # jmarrero-forge/actions at the commit named here; `just lint` runs the
-  # same recipe locally.
+  # repositories, at the versions its `just check` recipe pins on the
+  # actions repository's main, which this follows (#544); `just lint` runs
+  # the same recipe locally.
   lint:
     runs-on: ubuntu-26.04
     timeout-minutes: 15
@@ -43,13 +50,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: jmarrero-forge/actions/lint@23ed6a7b8e75b1811e3f1e2997ff201f50657420
+      - uses: cgwalters-forge/actions/lint@main
 
   # The bounds, runner configuration and pools that dispatch.yml reads from
   # the default branch, and review.yml's bounds: a file that does not parse
   # fails every run after the merge.
   config:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -73,11 +80,42 @@ jobs:
           sys.exit(failed)
           PY
 
+  # The deployment code may only shrink (#890): a change fails if it adds
+  # any file but a workflow, JSON, TOML, markdown or the config test crate's
+  # test source and lockfile, or if it grows the
+  # line count of the .cjs and .sh files, so a fix to a script deletes at
+  # least as many lines as it adds. Renames count as an add and a delete.
+  shrink:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Refuse new scripts and growth of the .cjs and .sh files
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: |
+          added=$(git diff --no-renames --diff-filter=A --name-only "$BASE" HEAD |
+            grep -vE '^\.github/workflows/[^/]+\.ya?ml$|\.(json|toml|md)$|^\.github/agentic-job/config-test/(tests/config\.rs|Cargo\.lock)$' || true)
+          if [ -n "$added" ]; then
+            awk '{ print "::error::adds a script file: " $0 }' <<< "$added"
+            exit 1
+          fi
+          growth=$(git diff --no-renames --numstat "$BASE" HEAD |
+            awk -F'\t' '$3 ~ /\.(cjs|sh)$/ { n += $1 - $2 } END { print n + 0 }')
+          echo "net lines added to .cjs and .sh files: $growth"
+          if [ "$growth" -gt 0 ]; then
+            echo "::error::grows the .cjs and .sh files by $growth lines; delete at least as many as you add"
+            exit 1
+          fi
+
   # Require only ci in the ruleset, on both PR and merge-group commits.
   ci:
     if: ${{ always() }}
-    needs: [test, lint, config]
-    runs-on: ubuntu-24.04
+    needs: [test, lint, config, shrink]
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions: {}
     steps:

@@ -1,0 +1,14 @@
+# The checks of this repository's runner configuration, bounds, pools and
+# dispatch.yml (`just test-config`). Its own workspace, so no other crate
+# picks it up.
+[package]
+name = "config-test"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dev-dependencies]
+serde_json = { version = "1", features = ["preserve_order"] }
+toml = { version = "1", features = ["preserve_order"] }
