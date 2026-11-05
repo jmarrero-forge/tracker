@@ -114,7 +114,7 @@ Done by jmarrero, since the bot's token cannot (the bring-up walkthrough's
    `deployment/deployment.json`. `AGENT_REVIEW` turns on the review
    workflow, once the broker admits its `pull_request_target` runs.
 
-Then `gh workflow run trial.yml -R jmarrero-forge/tracker -f kind=implement -f item=20`
+Then `gh workflow run trial.yml -R jmarrero-forge/tracker -f repo=jmarrero-forge/tracker -f kind=implement -f item=20`
 tries the whole path with the scripted agent (after 1 and 2). It creates
 jmarrero-bot/tracker, the bot's fork of this repository, if missing, turns
 its Actions off and pushes the trial branch there.
