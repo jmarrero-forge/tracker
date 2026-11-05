@@ -14,6 +14,17 @@
     "jmarrero-forge/image-builder",
     "jmarrero-forge/osbuild"
   ],
+  "follow": ["jmarrero-forge/tracker", "jmarrero-forge/actions"],
   "wip": 0,
-  "triage": false
+  "triage": false,
+  "pr": {
+    "staleDays": 0,
+    "reviewWorkflow": "review.yml",
+    "checkReruns": true,
+    "ownerBranches": true,
+    "fixPools": ["claude"],
+    "mergeAuthors": ["dependabot[bot]"],
+    "headOwners": ["jmarrero-bot", "jmarrero-forge"],
+    "rebaseRounds": 2
+  }
 }

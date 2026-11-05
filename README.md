@@ -28,25 +28,28 @@ This repository is also the caller of
 [agentic-job](https://github.com/cgwalters-forge/agentic-job) runs and of
 [agent-board](https://github.com/cgwalters-forge/agent-board)'s pass for
 jmarrero-forge: cgwalters-forge/tracker's controller, retargeted (see
-Resync). It is being brought up beside the current bot (tracker#35):
-nothing here writes to the board or to other repositories' pull requests
-yet.
+Resync). Since cutover (tracker#42) its pass is the board's only writer:
+the bot's homegit loop is stopped.
 
 | Workflow | What it does | Status |
 | --- | --- | --- |
 | [dispatch](.github/workflows/dispatch.yml) | One agent run (`implement`, `triage`, `research`, `review` or `fix`) on an item of a repository in the bounds ([dispatch.toml](.github/agentic-job/dispatch.toml), comment-only kinds [comment.toml](.github/agentic-job/comment.toml), fixes [fix.toml](.github/agentic-job/fix.toml), the forge's forks [midstream.toml](.github/agentic-job/midstream.toml) and [midstream-fix.toml](.github/agentic-job/midstream-fix.toml)), through jmarrero-forge/actions' `cgwalters-agentic-job.yml`; the kind's [profile](.github/agentic-job/profiles) goes before the task | By hand only; waits for the setup below |
 | [trial](.github/workflows/trial.yml) | The same path with agentic-job's scripted agent, against this repository: no model, broker or tailnet | Waits for the secret and environment below |
-| [poll](.github/workflows/poll.yml) | `agent-board pass` on [pass.json](.github/pass.json) every 10 minutes: pull request follow-up, epics, scheduling and board Status | Preview only: each run's summary says what it would have done |
+| [poll](.github/workflows/poll.yml) | `agent-board pass` on [pass.json](.github/pass.json) every 10 minutes: pull request follow-up, epics, scheduling and board Status | Applies while the variable `PASS_APPLY` is `enabled`; otherwise each run's summary says what it would have done |
 | [review](.github/workflows/review.yml) | An agent's review of every pull request here, through `cgwalters-review.yml` | Off until the variable `AGENT_REVIEW` is set |
 | [ci](.github/workflows/ci.yml) | `just test` (agent-board's installer, the config tests, the poll's checks), actionlint and zizmor, that the bounds parse, and that scripts only shrink | On |
 
-The pass is a preview in every way that would let it write: pass.json has
-`wip: 0`, `triage: false` and no `follow` or `epics`, it reads with
-`JMARRERO_BOT_READ_TOKEN`, which can write nothing, `--apply` is passed
-only while the variable `PASS_APPLY` is `enabled`, and even then its caps
-(`--max-dispatch 0 --max-writes 0`) take no board or forge step; only the
-`next` job would start the following pass. Cutover (tracker#42) changes
-all of these.
+The pass follows the bot's pull requests here and in
+jmarrero-forge/actions (fix, rebase and continuation rounds, and the merge
+once approved and green) and derives every board item's Status, with
+upstream's caps (`--max-dispatch 8 --max-writes 20
+--max-status-changes 50`). It starts no board work yet: pass.json has
+`wip: 0`, `triage: false` and no `epics`, `pools`, `usage` or `holds`;
+each of those lanes is a pull request of its own. `--apply` is passed
+only while the variable `PASS_APPLY` is `enabled`, whether the pass is
+scheduled or started by hand (upstream lets a manual `apply=true`
+through without it), so unsetting `PASS_APPLY` stops every write and
+ends the chain of `next` passes.
 
 Third-party actions are pinned by commit. The wrappers' pin in
 `dispatch.yml` and `review.yml` is a commit on jmarrero-forge/actions
@@ -59,7 +62,8 @@ change here.
 
 The bot's write token is `JMARRERO_BOT_PAT`, an organization secret
 available to this repository, as upstream's is `CGWALTERS_BOT_PAT`: any
-job here can read it. `dispatch.yml` passes it to the wrapper as
+job here can read it. The pass reads the board with it and makes its
+writes as it. `dispatch.yml` passes it to the wrapper as
 `SAFE_OUTPUTS_PAT`, which hands it to apply, in the protected
 `agent-apply` environment, and to status comments on items of other
 repositories; `trial.yml` passes it for `implement` alone. Apply pushes a run's branch to jmarrero-bot's fork of the
@@ -90,13 +94,17 @@ Done by jmarrero, since the bot's token cannot (the bring-up walkthrough's
    apply, and `dispatch.yml` names it for every run.
 2. The organization secret `JMARRERO_BOT_PAT`, available to selected
    repositories (this one only): a classic token of jmarrero-bot with the
-   `repo`, `workflow`, `project` and `read:org` scopes. Apply needs `repo`
-   and `workflow` (agentic-job docs/workflow.md, "Pull requests come from
-   a fork"); the pass, once it applies (tracker#42), `project` and
-   `read:org`.
+   `repo`, `workflow`, `project` and `read:org` scopes, with an expiry and
+   a reminder to renew it. Apply needs `repo` and `workflow` (agentic-job
+   docs/workflow.md, "Pull requests come from a fork"); the pass reads the
+   board with it and makes its writes as it (Status, and comments, labels
+   and merges on the followed repositories' pull requests), which needs
+   `project` and `read:org`, and `workflow` too, since GitHub refuses to
+   merge a pull request that changes `.github/workflows` without it.
 3. The organization secret `JMARRERO_BOT_READ_TOKEN`, available to this
    repository only: a classic token of jmarrero-bot with `read:project`
-   and `read:org`, which the preview pass reads with until cutover.
+   and `read:org`, which the pass read with until cutover. It is kept
+   until the pass has run a clean day, in case cutover is reverted.
 4. In the organization's Actions settings, if actions are restricted:
    allow `cgwalters-forge/agentic-job@*` and `jmarrero-forge/actions@*`,
    plus the third-party actions the workflows pin.
