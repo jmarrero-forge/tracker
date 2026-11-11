@@ -98,7 +98,7 @@ jobs:
 
   run:
     needs: target
-    uses: cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@57119eeffa17ea41b383cfdaf8370b8abeba8868 # v0.6.9
+    uses: cgwalters-forge/agentic-job/.github/workflows/agentic-job.yml@3f9f6425119b97bb3620a38fe0adc8e79be7dc8e # v0.6.11
     # The bot's token, the organization secret dispatch.yml passes too, for
     # implement alone: its apply, in the agent-apply environment
     # (`apply-environment` below), pushes to the bot's fork and opens a pull
