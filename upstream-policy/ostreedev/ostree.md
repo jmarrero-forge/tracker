@@ -1,7 +1,7 @@
 ---
 verdict: bot-ok
-ai-trailer: default (Generated-by: AI); nothing written, and precedent on main is Assisted-by or Generated-by (12 of the last 100 commits, four authors)
-dco: no (docs/CONTRIBUTING.md says Signed-off-by is not required, the main ruleset has no status checks, and no DCO check ran on the 8 recent PR heads sampled)
+ai-trailer: default (Generated-by: AI); nothing written, and precedent on main is Assisted-by or Generated-by (20 of the last 100 commits, five authors)
+dco: no (docs/CONTRIBUTING.md says Signed-off-by is not required, main's rulesets have no status checks and its branch protection requires only Jenkins pr-merge, and no DCO check ran on the 8 recent PR heads sampled)
 sources:
   - repo: ostreedev/ostree
     path: .gemini
@@ -15,7 +15,8 @@ sources:
   - repo: ostreedev/ostree
     path: docs/contributing-tutorial.md
     sha: 0bcf8feb5f35b9683eb2ef2cc6c812cbe0c0bb78
-checked: 2026-09-25 by the policy-check subagent (coordinator session 929c7a64, converted from an earlier read-only survey and re-read against current upstream)
+checked: 2026-11-24 by a coordinator subagent (sources, policy-named files, main's protection and rulesets, and checks on 8 recent PR heads re-read against GitHub)
+rebase: any
 ---
 
 No file mentions AI, LLMs or disclosure trailers. There is no AGENTS.md, no PR
@@ -56,3 +57,14 @@ cgwalters' standing default for these repositories (jmarrero-forge/tracker#23):
 when he accepts a forge PR, it is posted upstream under the bot identity, and
 upstream rules on LLMs are an advisory warning unless they clearly disallow
 bot accounts.
+
+## Re-check and rebase (2026-11-24)
+
+Every source still has its recorded id, and no other policy-named file
+has appeared in the scanned directories; ostreedev/.github is still
+absent. Main's classic branch protection requires the Jenkins pr-merge
+check, not a DCO check; the counts above replace the 12 quoted in the
+rationale. `rebase: any` is as cgwalters-forge/tracker's record of
+ostree has it (his 10 November decision: a clean promotion rebase needs
+no further approval, a conflict holds), taken with jmarrero's 2026-11-24
+decision to maintain ostree that way.
