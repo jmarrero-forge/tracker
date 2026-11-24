@@ -44,9 +44,15 @@ The pass follows the bot's pull requests here and in
 jmarrero-forge/actions, and in the forge's forks with the `bot-midstream`
 topic (never merging there), and derives every board item's Status, with
 upstream's caps (`--max-dispatch 20 --max-writes 60
---max-status-changes 50`). It starts no board work yet: pass.json has
-`wip: 0`, `triage: false` and no `epics`, `pools`, `usage` or `holds`;
-each of those lanes is a pull request of its own. `--apply` is passed
+--max-status-changes 50`). It starts board work as upstream's does,
+within pass.json's `wip` and the `claude` pool; a lane left off
+(`sessions`, `mix`) is a pull request of its own. From 09:00 UTC each
+day it also plans the maintainer digest (`maintain`, agent-board's
+docs/pass.md, "Maintain"): one `research` run, reserving a fifth of the
+pool's allowance while it is due, that sorts the incoming pull requests
+of ostreedev/ostree and coreos/rpm-ostree into one comment on
+[tracker#117](https://github.com/jmarrero-forge/tracker/issues/117) and
+writes nothing upstream. `--apply` is passed
 only while the variable `PASS_APPLY` is `enabled`, whether the pass is
 scheduled or started by hand (upstream lets a manual `apply=true`
 through without it), so unsetting `PASS_APPLY` stops every write and
