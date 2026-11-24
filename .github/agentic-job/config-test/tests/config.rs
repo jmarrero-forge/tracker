@@ -1862,8 +1862,22 @@ fn the_pass_follows_our_repositories_only() {
     for key in ["usage", "holds"] {
         assert_eq!(pass[key]["repository"], "jmarrero-forge/bot-ops", "{key}");
     }
-    for key in ["maintain", "sessions", "mix"] {
+    for key in ["sessions", "mix"] {
         assert!(pass.get(key).is_none(), "{key}");
+    }
+    // The daily maintainer digest (tracker#117) covers the two upstreams
+    // jmarrero named and nothing the pass would derive: `max` is their
+    // count, so no searched repository is added beside them.
+    let maintain = &pass["maintain"];
+    let include = &maintain["repos"]["include"];
+    assert_eq!(include, &json!(["ostreedev/ostree", "coreos/rpm-ostree"]));
+    assert_eq!(maintain["repos"]["max"], json!(include.as_array().expect("include").len()));
+    assert_eq!(maintain["share"], json!(0.2));
+    assert_eq!(maintain["digest"], json!({"repository": "jmarrero-forge/tracker", "issue": 117}));
+    // Both digest upstreams' midstream forks reach the holds' proposals.
+    let proposals = pass["holds"]["proposals"]["repositories"].as_array().expect("proposals");
+    for repo in ["jmarrero-forge/ostree", "jmarrero-forge/rpm-ostree"] {
+        assert!(proposals.contains(&json!(repo)), "{repo}");
     }
     let poll = read("../workflows/poll.yml");
     assert!(poll.contains(" --max-dispatch 20 --max-writes 60 --max-status-changes 50 "));

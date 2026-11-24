@@ -188,6 +188,868 @@ jobs:
           AGENT_BOARD: ${{ runner.temp }}/agent-board/bin/agent-board
           # The bounds' and pass.json's organization rules read live metadata.
           GH_TOKEN: ${{ github.token }}
+      # Exercise the trusted renderer/publisher with no tokens or API calls.
+      # Keep new scripts inline: deployment scripts and Justfile may only shrink.
+      # Ours: upstream's tests on our four targets, less those of its own
+      # targets, its retention rehearsal and its saved live report; also
+      # run by just test-ci-health.
+      - name: Test CI-health saved reports and publication
+        shell: node {0}
+        run: |
+          const assert = require('node:assert/strict');
+          const fs = require('node:fs');
+          const vm = require('node:vm');
+          const { createHash } = require('node:crypto');
+          const { test } = require('node:test');
+          const workflow = fs.readFileSync('.github/workflows/ci-health.yml', 'utf8');
+          const workflowSource = /          script: \|\n([\s\S]+?)\n      - uses: actions\/upload-artifact/.exec(workflow)[1].replace(/^            /gm, '');
+          // Ours: the workflow names no status issue yet, so publication is
+          // exercised against a fixture one; the workflow's own text refuses it.
+          const issue = 1229, marker = `<!-- tracker-ci-health:${issue}:v1 -->`;
+          const source = workflowSource.replace('issue = null;', `issue = ${issue};`);
+          assert.notEqual(source, workflowSource);
+          const config = JSON.parse(fs.readFileSync('.github/ci-health/config.json'));
+          const hash = b => createHash('sha256').update(b).digest('hex');
+          const sha = 'a'.repeat(40), rev = /^  AGENT_BOARD_REV: ([0-9a-f]{40})$/m.exec(workflow)[1];
+          const now = Date.UTC(2026, 10, 5, 12), until = Date.UTC(2026, 10, 5);
+          const iso = t => new Date(t).toISOString();
+          const empty = () => ({ runs: 0, attempts: 0, expected_attempts: 0, success: 0, failed: 0, cancelled: 0,
+            skipped: 0, in_progress: 0, other: 0, first_attempt_success: 0, first_attempt_failed: 0,
+            first_attempt_denominator: 0, first_attempt_pass_rate: null, denominator: 0, pass_rate: null });
+          const report = () => ({schema: 'agent-board/ci-health/v1', since: iso(until - 30 * 86400000), until: iso(until),
+            complete: false, bounds: {api_operations: 500, collection_seconds: 120, pages_per_listing: 10, log_bytes: 1048576, aggregate_decoded_bytes: 33554432}, decoded_bytes: 0,
+            targets: config.targets.map(target => ({target, complete: false, listing_complete: false,
+              warnings: ['history unavailable/incomplete: auth / truncation / logs'], populations: {default_push: empty(), pull_request: empty()}})), groups: []});
+          const signature = 'b'.repeat(64);
+          const observedReport = () => {
+            const r = report();
+            Object.assign(r.targets[0].populations.default_push, {runs: 2, attempts: 2, expected_attempts: 2,
+              failed: 2, denominator: 2, pass_rate: 0, first_attempt_failed: 2,
+              first_attempt_denominator: 2, first_attempt_pass_rate: 0});
+            return r;
+          };
+          const entry = days => ({class: 'flake', evidence: ['https://github.com/ostreedev/ostree/actions/runs/123456789'], owner: 'reviewed-owner',
+            issue: null, fix_status: 'staged', first_seen: iso(until - days * 86400000), explained_at: null, explanation: null});
+          const group = () => ({observation: {signature, repository: 'ostreedev/ostree', job: 'job', test: '', first_error: 'error: <script>@cgwalters **x** ' + marker,
+            occurrences: 2, run_ids: [123456789, 234567890], first_seen: iso(until - 86400000),
+            samples: [{run_id: 123456789, attempt: 1, job_id: 555555555, url: 'https://github.com/ostreedev/ostree/actions/runs/123456789'}]},
+            classification: null, class: 'unknown', findings: ['recurring_without_issue']});
+          async function run(options = {}) {
+            const r = options.report ?? report(), cfg = structuredClone(config);
+            if (options.targets) cfg.targets = options.targets;
+            cfg.index = options.index ?? {};
+            const configBytes = Buffer.from(JSON.stringify(cfg)), raw = Buffer.from(JSON.stringify(r));
+            const manifest = {repository: 'jmarrero-forge/tracker', ref: 'refs/heads/main', source_revision: sha,
+              collector_revision: rev, run_id: '42', run_attempt: '1', config_sha256: hash(configBytes), report_sha256: hash(raw), ...options.manifest};
+            const files = new Map([['report.json', raw], ['provenance.json', Buffer.from(JSON.stringify(manifest))]]);
+            const calls = [], summaries = [], outputs = {}, comments = options.comments ?? [];
+            const api = name => async args => {
+              calls.push({name, args});
+              if (options.apiFailure) throw Error('status API unavailable');
+              return {data: {}};
+            };
+            const context = {repo: {owner: 'jmarrero-forge', repo: 'tracker'}, ref: options.ref ?? 'refs/heads/main', sha, runId: 42,
+              eventName: 'workflow_dispatch', payload: {repository: {default_branch: 'main'}}};
+            const github = {rest: {repos: {getContent: async args => ({data: {type: 'file', encoding: 'base64', content:
+              (args.path.endsWith('publication.json') ? Buffer.from(JSON.stringify({publish: options.publish ?? false})) : configBytes).toString('base64')}})}, issues: {
+                get: async () => ({data: {number: issue, repository_url: 'https://api.github.com/repos/jmarrero-forge/tracker'}}),
+                listComments: async args => ({data: options.fullPages ? Array(100).fill({body: ''}) : args.page === 1 ? comments : []}),
+                createComment: api('create'), updateComment: api('update')}}};
+            const fakeFS = {lstatSync: path => { const name = path.split('/').pop(); if (options.missing === name || !files.has(name)) throw Error('missing report');
+                return {isFile: () => true, size: options.oversize ? 5 * 1024 * 1024 : files.get(name).length}; },
+              readFileSync: path => files.get(path.split('/').pop()), writeFileSync: (path, data) => {
+                if (options.writeFailure === path.split('/').pop()) throw Error('dated file write failed');
+                files.set(path.split('/').pop(), data);
+              }};
+            class Clock extends Date { static now() { return options.now ?? now; } }
+            const sandbox = {Buffer, Date: Clock, console, process: {env: {RUNNER_TEMP: '/tmp', AGENT_BOARD_REV: options.rev ?? rev, GITHUB_RUN_NUMBER: options.runNumber ?? '10', GITHUB_RUN_ATTEMPT: '1', PREVIEW: options.preview === false ? 'false' : 'true',
+              RAW_ARTIFACT_URL: 'https://github.com/jmarrero-forge/tracker/actions/runs/42/artifacts/123'}},
+              context, github, core: {info() {}, setOutput(name, value) {outputs[name] = value;},
+                summary: {addRaw(text) {summaries.push(text); return this;}, async write() {
+                  if (options.summaryFailure) throw Error('summary unavailable');
+                }}},
+              require: name => name === 'node:fs' ? fakeFS : require(name)};
+            let error;
+            try { await vm.runInNewContext('(async () => {\n' + (options.source ?? source) + '\n})()', sandbox); } catch (e) { error = e; }
+            return {error, calls, files, summaries, outputs};
+          }
+          const owned = body => ({id: 9, body, user: {login: 'github-actions[bot]', type: 'Bot'}, issue_url: `https://api.github.com/repos/jmarrero-forge/tracker/issues/${issue}`});
+          test('coverage totals precede truncated warnings and count empty populations by runs', async () => {
+            const r = report();
+            for (const t of r.targets) Object.assign(t, {complete: true, listing_complete: true, warnings: []});
+            Object.assign(r.targets[0], {complete: false, listing_complete: false,
+              warnings: Array(20).fill('listing unavailable')});
+            Object.assign(r.targets[1], {complete: false, warnings: ['logs unavailable']});
+            // Nonterminal-only populations have runs but no pass-rate denominator.
+            r.targets[0].populations.default_push = {...empty(), runs: 1, attempts: 1, expected_attempts: 1, cancelled: 1};
+            r.targets[1].populations.pull_request = {...empty(), runs: 1, attempts: 1, expected_attempts: 1, in_progress: 1};
+            const n = config.targets.length;
+            const expected = `**Coverage totals (configured scope only):** ${n - 2}/${n} targets complete; ` +
+              '1 with incomplete listings; 1 with complete listings but incomplete attempts/logs. ' +
+              `Populations with no observed runs: default_push ${n - 1}/${n}; pull_request ${n - 1}/${n}.`;
+            for (const publish of [false, true]) {
+              const got = await run({report: r, publish, preview: false});
+              assert.ifError(got.error);
+              assert.equal(got.calls.length, publish ? 1 : 0);
+              for (const text of [got.files.get('2026-11-05.md'), got.summaries[0], ...got.calls.map(c => c.args.body)]) {
+                assert.ok(text.includes(expected), text);
+                assert.ok(text.indexOf(expected) < text.indexOf('**WARNING:**'));
+                assert.match(text, /No observed runs can mean unavailable history, not inactivity or passing CI\./);
+              }
+              assert.match(got.summaries[0], /Presentation truncated:/);
+              assert.deepEqual(JSON.parse(got.files.get('2026-11-05.json')), r);
+            }
+            for (const complete of [false, true]) {
+              const allEmpty = report();
+              allEmpty.complete = complete;
+              if (complete) for (const t of allEmpty.targets) Object.assign(t, {complete: true, listing_complete: true, warnings: []});
+              const got = await run({report: allEmpty});
+              assert.ifError(got.error);
+              assert.ok(got.summaries[0].includes(`${complete ? n : 0}/${n} targets complete; ${complete ? 0 : n} with incomplete listings; 0 with complete listings but incomplete attempts/logs.`));
+              assert.ok(got.summaries[0].includes(`Populations with no observed runs: default_push ${n}/${n}; pull_request ${n}/${n}.`));
+            }
+          });
+
+          test('failure counts survive missing signatures and distinguish first tries from reruns', async () => {
+            const r = report(), target = r.targets[0];
+            target.populations.default_push = {...empty(), runs: 2, attempts: 4, expected_attempts: 4,
+              success: 1, failed: 3, denominator: 4, pass_rate: 0.25,
+              first_attempt_failed: 2, first_attempt_denominator: 2, first_attempt_pass_rate: 0};
+            target.populations.pull_request = {...empty(), runs: 4, attempts: 4, expected_attempts: 5,
+              cancelled: 1, skipped: 1, in_progress: 1, other: 1};
+            for (const options of [{}, {publish: true}, {publish: true, preview: false}]) {
+              const got = await run({report: r, ...options});
+              assert.ifError(got.error);
+              assert.equal(got.calls.length, options.preview === false ? 1 : 0);
+              for (const text of [got.files.get('2026-11-05.md'), got.summaries[0], ...got.calls.map(c => c.args.body)]) {
+                assert.match(text, /\| Failed attempts \(first\/all observed\) \|/);
+                const rows = text.split('\n').filter(line => line.startsWith('| ostreedev/ostree / tests.yml |'));
+                assert.equal(rows.length, 2);
+                assert.ok(rows[0].endsWith('| 0/0/0/0 | 2/3 |'), rows[0]);
+                assert.ok(rows[1].endsWith('| 1/1/1/1 | 0/0 |'), rows[1]);
+                assert.match(text, /0 observed groups; 0 unclassified/);
+                assert.match(text, /Failed attempts include failures without a signature; first attempts are a subset of all observed attempts, not an additional count\./);
+                assert.match(text, /INCOMPLETE listing/);
+              }
+              assert.deepEqual(JSON.parse(got.files.get('2026-11-05.json')), r);
+            }
+          });
+
+          test('finding totals include truncated groups and distinguish absent overdue index entries', async () => {
+            const r = observedReport(), index = {};
+            for (let i = 0; i < 15; i++) {
+              const g = group(), sig = i.toString(16).padStart(64, '0');
+              g.observation.signature = sig;
+              if (i < 3) {
+                const e = entry(i === 2 ? 7 : 8);
+                e.issue = 'https://github.com/jmarrero-forge/tracker/issues/68';
+                if (i === 1) e.class = 'infra';
+                index[sig] = e; g.classification = e; g.class = e.class;
+                g.findings = i === 0 ? ['flake_unexplained_over_seven_days'] : [];
+              }
+              if (i === 14) {
+                // Unknown does not imply recurring; occurrences are not runs.
+                g.observation.run_ids = [123456789];
+                g.observation.occurrences = 50; g.findings = [];
+              }
+              r.groups.push(g);
+            }
+            index['c'.repeat(64)] = entry(8);
+            index['d'.repeat(64)] = entry(7);
+            index['e'.repeat(64)] = {...entry(8), explained_at: iso(until - 86400000), explanation: 'reviewed'};
+            index['f'.repeat(64)] = {...entry(8), class: 'real'};
+            const expected = '**Finding totals (before presentation limits):** 15 observed groups; 12 unclassified; ' +
+              '11 recurring without an issue; 1 observed overdue unexplained flakes; 1 absent overdue unexplained index entries.';
+            for (const publish of [false, true]) {
+              const got = await run({report: r, index, publish, preview: false});
+              assert.ifError(got.error);
+              for (const text of [got.files.get('2026-11-05.md'), got.summaries[0], ...got.calls.map(c => c.args.body)]) {
+                assert.ok(text.includes(expected), text);
+                assert.match(text, /Counts are signature groups, not runs; categories overlap\. Zero findings do not establish healthy CI\./);
+                assert.ok(text.indexOf(expected) < text.indexOf('| Target |'));
+              }
+              assert.match(got.summaries[0], /Presentation truncated: 3 more entries/);
+              assert.equal(got.calls.length, publish ? 1 : 0);
+              assert.deepEqual(JSON.parse(got.files.get('2026-11-05.json')), r);
+            }
+            const emptyResult = await run();
+            assert.ifError(emptyResult.error);
+            assert.match(emptyResult.summaries[0], /0 observed groups; 0 unclassified; 0 recurring without an issue; 0 observed overdue unexplained flakes; 0 absent overdue unexplained index entries/);
+            assert.match(emptyResult.summaries[0], /Zero findings do not establish healthy CI/);
+          });
+          test('group recurrence is bounded by repository runs across workflows and populations', async () => {
+            for (const publish of [false, true]) for (const [counts, runs, accepted] of [
+              [[0, 0, 0, 0, 0, 0], 2, false], [[1, 0, 0, 0, 0, 0], 2, false],
+              [[1, 1, 0, 0, 0, 0], 2, true], [[1, 0, 0, 0, 0, 1], 2, true],
+              [Array(6).fill(500), 3000, true], [Array(6).fill(500), 3001, false],
+            ]) {
+              const r = report();
+              const repo = 'ostreedev/ostree';
+              const populations = r.targets.filter(t => t.target.repository === repo)
+                .flatMap(t => Object.values(t.populations));
+              assert.equal(populations.length, 6);
+              populations.forEach((p, i) => Object.assign(p, {runs: counts[i], attempts: counts[i],
+                expected_attempts: counts[i], failed: counts[i], denominator: counts[i],
+                pass_rate: counts[i] ? 0 : null, first_attempt_failed: counts[i],
+                first_attempt_denominator: counts[i], first_attempt_pass_rate: counts[i] ? 0 : null}));
+              // Unrelated repositories cannot lend runs to this signature.
+              Object.assign(r.targets.find(t => t.target.repository === 'coreos/rpm-ostree').populations.default_push,
+                {runs: 1000, attempts: 1000, expected_attempts: 1000, skipped: 1000});
+              const g = group();
+              Object.assign(g.observation, {repository: repo, occurrences: runs,
+                run_ids: Array.from({length: runs}, (_, i) => i + 1), samples: []});
+              r.groups = [g];
+              const got = await run({report: r, publish, preview: false});
+              if (accepted) {
+                assert.ifError(got.error);
+                assert.equal(got.calls.length, publish ? 1 : 0);
+                assert.match(got.files.get('2026-11-05.md'), new RegExp(`${runs} runs, ${runs} occurrences`));
+              } else {
+                assert.match(got.error?.message ?? '', /invalid run IDs/);
+                assert.equal(got.calls.length, 0);
+                assert.deepEqual(got.outputs, {});
+                assert.deepEqual([...got.files.keys()], ['report.json', 'provenance.json']);
+              }
+            }
+          });
+          test('warning preview shares slots across targets before repeating a target', async () => {
+            for (const publish of [false, true]) {
+              const r = report();
+              r.targets = r.targets.slice(0, 3);
+              r.targets.forEach((t, i) => { t.warnings = Array.from({length: i ? 1 : 20}, (_, n) => `diagnostic-${i}-${n} <unsafe>`); });
+              const got = await run({report: r, targets: r.targets.map(t => t.target), publish, preview: false});
+              assert.ifError(got.error);
+              const body = got.summaries[0];
+              const preview = body.split('### Warnings\n')[1].split('\n\n')[0];
+              const lines = preview.split('\n').filter(line => line.startsWith('- **WARNING:**'));
+              assert.equal(lines.length, 12);
+              for (let i = 0; i < 3; i++) assert.ok(lines[i].includes(`diagnostic-${i}-0 &#60;unsafe&#62;`));
+              assert.ok(lines[3].includes('diagnostic-0-1'), 'second round retains source warning order');
+              assert.match(preview, /Presentation truncated: 19 more entries/);
+              assert.ok(!preview.includes('<unsafe>'));
+              const full = got.files.get('2026-11-05.md');
+              assert.equal((full.match(/diagnostic-/g) ?? []).length, 22);
+              assert.deepEqual(JSON.parse(got.files.get('2026-11-05.json')), r);
+              assert.equal(got.calls.length, publish ? 1 : 0);
+              if (publish) assert.equal(got.calls[0].args.body, body);
+            }
+          });
+
+          test('failure evidence links preserve attempts, jobs and window observation time', async () => {
+            for (const publish of [false, true]) for (const sampleCount of [0, 1, 3]) {
+              const r = observedReport(); r.groups = [group()];
+              const o = r.groups[0].observation;
+              // A rerun must not link to whichever attempt is latest now.
+              o.samples = Array.from({length: sampleCount}, (_, i) => ({
+                run_id: o.run_ids[i % 2], attempt: i + 2, job_id: 555555555 + i,
+                url: `https://github.com/${o.repository}/actions/runs/${o.run_ids[i % 2]}`,
+              }));
+              const result = await run({report: r, publish, preview: false});
+              assert.equal(result.error, undefined);
+              assert.equal(result.calls.length, publish ? 1 : 0);
+              for (const text of [result.summaries[0], result.files.get('2026-11-05.md'),
+                ...(publish ? [result.calls[0].args.body] : [])]) {
+                assert.ok(text.includes(`first observed in window ${o.first_seen}`));
+                for (const s of o.samples) {
+                  assert.ok(text.includes(`[run ${s.run_id}, attempt ${s.attempt}](${s.url}/attempts/${s.attempt})`));
+                  assert.ok(text.includes(`[job ${s.job_id}](${s.url}/job/${s.job_id})`));
+                }
+                if (!sampleCount) assert.ok(!text.includes('[job '));
+                assert.ok(!text.includes('<script>'));
+              }
+            }
+          });
+
+          test('population rows retain target coverage when warnings are truncated', async () => {
+            for (const [complete, listing, coverage] of [
+              [false, false, 'INCOMPLETE listing'],
+              [false, true, 'INCOMPLETE attempts/logs'],
+              [true, true, 'Complete'],
+            ]) for (const publish of [false, true]) {
+              const r = report();
+              // Fill the warning preview before the target whose rates matter.
+              r.targets[0].warnings = Array(20).fill('earlier target warning');
+              const t = r.targets.at(-1);
+              // Ours: with four targets the round-robin preview reaches every
+              // target's first warning, so the late one is its thirteenth.
+              Object.assign(t, {complete, listing_complete: listing,
+                warnings: complete ? [] : [...Array(12).fill('late target filler'), 'late target warning']});
+              for (const p of Object.values(t.populations)) Object.assign(p, {
+                runs: 1, attempts: 1, expected_attempts: 1, success: 1, denominator: 1, pass_rate: 1,
+                first_attempt_success: 1, first_attempt_denominator: 1, first_attempt_pass_rate: 1,
+              });
+              // An empty, completely listed target still has no passing data.
+              Object.assign(r.targets[1], {complete: true, listing_complete: true, warnings: []});
+              const result = await run({report: r, publish, preview: false});
+              assert.equal(result.error, undefined);
+              assert.equal(result.calls.length, publish ? 1 : 0);
+              const summary = result.summaries[0];
+              assert.match(summary, /Presentation truncated:/);
+              assert.ok(!summary.includes('late target warning'));
+              const full = result.files.get('2026-11-05.md');
+              if (!complete) assert.ok(full.includes('late target warning'));
+              for (const text of [summary, full, ...(publish ? [result.calls[0].args.body] : [])]) {
+                assert.ok(text.includes('| Target | Population | Target coverage |'));
+                for (const pop of ['default_push', 'pull_request']) {
+                  assert.ok(text.includes(`| ${t.target.repository} / ${t.target.workflow} | ${pop} | ${coverage} | 1 | 1/1 | 100.0% (1/1) | 100.0% (1/1) |`));
+                  assert.ok(text.includes(`| ${pop} | Complete | 0 | 0/0 | no data (0/0) | no data (0/0) |`));
+                }
+              }
+            }
+          });
+
+          test('observation dates are canonical UTC instants in the half-open window', async () => {
+            const end = Date.UTC(2026, 2, 5), start = end - 30 * 86400000;
+            for (const [firstSeen, valid] of [
+              [iso(start), true], [iso(end - 1), true], ['2026-02-28T12:34:56.789Z', true],
+              [iso(start - 1), false], [iso(end), false],
+              ['2026-02-30T00:00:00.000Z', false],
+              ['2026-03-02T00:00:00Z', true], ['2026-03-02T01:00:00.000+01:00', false],
+              ['2026-03-02', false], ['not a date', false], [null, false],
+            ]) {
+              const r = observedReport(); r.since = iso(start); r.until = iso(end);
+              r.groups = [group()]; r.groups[0].observation.first_seen = firstSeen;
+              const result = await run({report: r, now: end + 3600000, publish: true, preview: false});
+              if (valid) {
+                assert.equal(result.error, undefined, firstSeen);
+                assert.equal(result.calls.length, 1);
+                assert.equal(result.outputs['dated-ready'], 'true');
+              } else {
+                assert.match(result.error?.message ?? '', /invalid observation/, String(firstSeen));
+                assert.equal(result.calls.length, 0);
+                assert.equal(result.outputs['dated-ready'], undefined);
+                assert.deepEqual([...result.files.keys()], ['report.json', 'provenance.json']);
+              }
+            }
+          });
+
+          test('failure evidence requires positive IDs and bounded attempts', async () => {
+            for (const field of ['run_ids', 'run_id', 'job_id', 'attempt']) {
+              const values = [0, -1, 1.5, '1', null, Number.MAX_SAFE_INTEGER + 1];
+              if (field === 'attempt') values.push(101);
+              for (const value of values) {
+                const r = observedReport(); r.groups = [group()];
+                const o = r.groups[0].observation;
+                if (field === 'run_ids') o.run_ids[1] = value;
+                else {
+                  o.samples[0][field] = value;
+                  if (field === 'run_id') {
+                    o.run_ids[0] = value;
+                    o.samples[0].url = `https://github.com/ostreedev/ostree/actions/runs/${value}`;
+                  }
+                }
+                const result = await run({report: r, publish: true, preview: false});
+                assert.ok(result.error, `${field}=${value} must refuse`);
+                assert.equal(result.calls.length, 0);
+                assert.equal(result.outputs['dated-ready'], undefined);
+                assert.deepEqual([...result.files.keys()], ['report.json', 'provenance.json']);
+              }
+            }
+            for (const attempt of [1, 100]) {
+              const r = observedReport(); r.groups = [group()];
+              const o = r.groups[0].observation;
+              o.run_ids[0] = 1;
+              Object.assign(o.samples[0], {run_id: 1, job_id: 1, attempt,
+                url: 'https://github.com/ostreedev/ostree/actions/runs/1'});
+              const result = await run({report: r, publish: true, preview: false});
+              assert.equal(result.error, undefined);
+              assert.equal(result.calls.length, 1);
+              assert.equal(result.outputs['dated-ready'], 'true');
+            }
+          });
+
+          test('collector step invokes once and binds saved bytes to run and config', () => {
+            const collect = /        shell: node \{0\}\n        run: \|\n([\s\S]+?)\n      - uses: actions\/upload-artifact/.exec(workflow)[1].replace(/^          /gm, '');
+            const configBytes = fs.readFileSync('.github/ci-health/config.json');
+            const raw = Buffer.from(JSON.stringify(report())), files = new Map(), calls = [];
+            const env = {RUNNER_TEMP: '/tmp', GITHUB_REPOSITORY: 'jmarrero-forge/tracker', GITHUB_REF: 'refs/heads/main',
+              GITHUB_SHA: sha, AGENT_BOARD_REV: rev, GITHUB_RUN_ID: '42', GITHUB_RUN_ATTEMPT: '2'};
+            vm.runInNewContext(collect, {process: {env}, require: name => {
+              if (name === 'node:fs') return {readFileSync: path => {
+                assert.equal(path, '.github/ci-health/config.json'); return configBytes;
+              }, mkdirSync() {}, writeFileSync: (path, data) => files.set(path, data)};
+              if (name === 'node:child_process') return {execFileSync: (command, args, options) => {
+                calls.push(command);
+                assert.deepEqual(Array.from(args), ['ci-health', '--config', '.github/ci-health/config.json', '--format', 'json']);
+                assert.equal(options.timeout, 180000); assert.equal(options.maxBuffer, 4 * 1024 * 1024);
+                return raw;
+              }};
+              return require(name);
+            }});
+            assert.deepEqual(calls, ['/tmp/agent-board/bin/agent-board']);
+            assert.equal(files.get('/tmp/ci-health/report.json'), raw);
+            assert.deepEqual(JSON.parse(files.get('/tmp/ci-health/provenance.json')), {repository: env.GITHUB_REPOSITORY,
+              ref: env.GITHUB_REF, source_revision: sha, collector_revision: rev, run_id: '42', run_attempt: '2',
+              config_sha256: hash(configBytes), report_sha256: hash(raw)});
+          });
+          test('explicit bounded scope, default-off policy, serialized default-branch jobs and installer', () => {
+            assert.deepEqual(config.targets, [
+              ...['tests.yml', 'rust.yml', 'bootc.yaml'].map(workflow => ({repository: 'ostreedev/ostree', workflow})),
+              {repository: 'coreos/rpm-ostree', workflow: 'ci.yaml'}]);
+            assert.equal(JSON.parse(fs.readFileSync('.github/ci-health/publication.json')).publish, false);
+            assert.match(workflow, /cron: '43 6 \* \* \*'/);
+            assert.match(workflow, /group: ci-health\n  cancel-in-progress: false/);
+            assert.equal((workflow.match(/github.ref == format/g) ?? []).length, 2);
+            assert.match(workflow, /just build-agent-board "\$AGENT_BOARD_REV"/);
+            // The shared pin (just agent-board-pin) is what both scripts record and check.
+            assert.equal((workflow.match(/process\.env\.AGENT_BOARD_REV/g) ?? []).length, 2);
+            assert.doesNotMatch(workflow, /^ +CI_HEALTH_REV:|env\.CI_HEALTH_REV|secrets\./m);
+            assert.equal((workflow.match(/retention-days: 35/g) ?? []).length, 2);
+            assert.doesNotMatch(workflow.split('\n  report:')[1], /uses: actions\/checkout|^\s+run:/m);
+          });
+          test('preview and default-off do not write; empty/incomplete populations stay visible', async () => {
+            for (const options of [{}, {publish: true}, {preview: false}]) {
+              const result = await run(options);
+              assert.ifError(result.error); assert.equal(result.calls.length, 0);
+              const md = result.files.get('2026-11-05.md');
+              assert.match(md, /INCOMPLETE OBSERVATIONS/); assert.match(md, /auth \/ truncation \/ logs/);
+              assert.match(md, /no data \(0\/0\)/); assert.match(md, /NOT eventual run-level/);
+              assert.ok(md.includes(`fixed ${config.targets.length}-target baseline`));
+            }
+          });
+          test('pre-job failures remain failed populations without invented groups', async () => {
+            const r = report();
+            const target = r.targets.find(t => t.target.repository === 'ostreedev/ostree' && t.target.workflow === 'bootc.yaml');
+            target.listing_complete = true;
+            target.warnings = ['failed run has no jobs; no first-error signature available'];
+            for (const [name, count] of [['default_push', 2], ['pull_request', 1]]) {
+              target.populations[name] = {...empty(), runs: count, attempts: count, expected_attempts: count,
+                failed: count, first_attempt_failed: count, denominator: count, first_attempt_denominator: count,
+                pass_rate: 0, first_attempt_pass_rate: 0};
+            }
+            const got = await run({report: r});
+            assert.ifError(got.error); assert.equal(got.calls.length, 0);
+            const md = got.files.get('2026-11-05.md');
+            for (const [name, count] of [['default_push', 2], ['pull_request', 1]])
+              assert.ok(md.includes(`ostreedev/ostree / bootc.yaml | ${name} | INCOMPLETE attempts/logs | ${count} | ${count}/${count} | 0.0% (0/${count}) | 0.0% (0/${count})`));
+            assert.match(md, /failed run has no jobs/);
+            assert.match(md, /No observed groups; this is not evidence of recovery/);
+            assert.deepEqual(JSON.parse(got.files.get('2026-11-05.json')), r);
+          });
+          test('a report of a renamed workflow is not reinterpreted as the configured one', async () => {
+            const r = report();
+            const target = r.targets.find(t => t.target.repository === 'coreos/rpm-ostree');
+            // Synthetic populations: exercise both events, not a live census.
+            target.populations.default_push = {...empty(), runs: 1, attempts: 1, expected_attempts: 1,
+              failed: 1, first_attempt_failed: 1, denominator: 1, first_attempt_denominator: 1,
+              pass_rate: 0, first_attempt_pass_rate: 0};
+            target.populations.pull_request = {...empty(), runs: 1, attempts: 1, expected_attempts: 1,
+              success: 1, first_attempt_success: 1, denominator: 1, first_attempt_denominator: 1,
+              pass_rate: 1, first_attempt_pass_rate: 1};
+            const got = await run({report: r});
+            assert.ifError(got.error); assert.equal(got.calls.length, 0);
+            const md = got.files.get('2026-11-05.md');
+            assert.match(md, /rpm-ostree \/ ci.yaml \| default_push \| INCOMPLETE listing \| 1 \| 1\/1 \| 0\.0%/);
+            assert.match(md, /rpm-ostree \/ ci.yaml \| pull_request \| INCOMPLETE listing \| 1 \| 1\/1 \| 100\.0%/);
+            assert.match(md, /INCOMPLETE OBSERVATIONS/);
+            const old = structuredClone(r);
+            old.targets.find(t => t.target.repository === 'coreos/rpm-ostree').target.workflow = 'ci.yml';
+            const refused = await run({report: old, publish: true, preview: false});
+            assert.match(refused.error?.message ?? '', /target mismatch/);
+            assert.equal(refused.calls.length, 0);
+            assert.equal(refused.outputs['dated-ready'], undefined);
+          });
+          test('warning length bound applies before adding the target label', async () => {
+            for (const warning of ['x'.repeat(2000), '@<&\n'.repeat(500), '界'.repeat(2000)]) {
+              for (const publish of [false, true]) {
+                const r = report(); r.targets[0].warnings = [warning];
+                const got = await run({report: r, publish, preview: false});
+                assert.ifError(got.error);
+                assert.equal(got.outputs['dated-ready'], 'true');
+                assert.equal(got.calls.length, publish ? 1 : 0);
+                const escaped = warning.replace(/[@<&\n]/g, c => `&#${c.charCodeAt(0)};`);
+                assert.ok(got.files.get('2026-11-05.md').includes(escaped));
+                assert.ok(!got.files.get('2026-11-05.md').includes('&#38;#'));
+                assert.ok(Buffer.byteLength(got.summaries[0]) < 60000);
+                assert.deepEqual(JSON.parse(got.files.get('2026-11-05.json')), r);
+              }
+            }
+            const r = report(); r.targets[0].warnings = ['x'.repeat(2001)];
+            const refused = await run({report: r, publish: true, preview: false});
+            assert.match(refused.error.message, /invalid\/oversized text/);
+            assert.equal(refused.outputs['dated-ready'], undefined);
+            assert.equal(refused.calls.length, 0);
+          });
+          test('stable marker creates once, updates once, identical rerun does not append', async () => {
+            const first = await run({publish: true, preview: false}); assert.ifError(first.error);
+            assert.deepEqual(first.calls.map(c => c.name), ['create']);
+            const body = first.calls[0].args.body;
+            const same = await run({publish: true, preview: false, comments: [owned(body)]}); assert.ifError(same.error);
+            assert.equal(same.calls.length, 0);
+            const updated = await run({publish: true, preview: false, comments: [owned(body + '\nprevious details')]});
+            assert.ifError(updated.error); assert.deepEqual(updated.calls.map(c => c.name), ['update']);
+            assert.equal(updated.calls[0].args.comment_id, 9);
+          });
+          test('publication never replaces a newer window, but same-day refresh remains allowed', async () => {
+            const first = await run({publish: true, preview: false}); assert.ifError(first.error);
+            const body = first.calls[0].args.body;
+            const tomorrow = report();
+            tomorrow.until = iso(until + 86400000); tomorrow.since = iso(until - 29 * 86400000);
+            const later = await run({report: tomorrow, now: now + 86400000, publish: true, preview: false, comments: [owned(body)]});
+            assert.ifError(later.error); assert.deepEqual(later.calls.map(c => c.name), ['update']);
+            const comments = [owned(later.calls[0].args.body)];
+            // Yesterday still passes the two-day freshness check. Serialization
+            // alone does not prevent its delayed rerun from replacing today.
+            const stale = await run({now: now + 86400000, publish: true, preview: false, comments});
+            assert.match(stale.error?.message ?? '', /newer status window/);
+            assert.equal(stale.calls.length, 0);
+            assert.equal(stale.outputs['dated-ready'], 'true');
+            assert.deepEqual(JSON.parse(stale.files.get('2026-11-05.json')), report());
+            for (const options of [{publish: false, preview: false}, {publish: true, preview: true}]) {
+              const preview = await run({...options, now: now + 86400000, comments});
+              assert.ifError(preview.error); assert.equal(preview.calls.length, 0);
+            }
+            for (const heading of ['old', '## Rolling CI health: 2026-02-30',
+              '## Rolling CI health: 2026-11-5', '## Rolling CI health: 2026-11-05 extra']) {
+              const bad = await run({publish: true, preview: false,
+                comments: [owned(marker + '\n' + heading + '\n\nold details')]});
+              assert.match(bad.error?.message ?? '', /invalid owned status window/);
+              assert.equal(bad.calls.length, 0); assert.equal(bad.outputs['dated-ready'], 'true');
+            }
+          });
+          test('older workflow runs cannot overwrite same-day status on a delayed rerun', async () => {
+            const first = await run({publish: true, preview: false}); assert.ifError(first.error);
+            const comments = [owned(first.calls[0].args.body)];
+            const stale = await run({publish: true, preview: false, runNumber: '9', comments});
+            assert.match(stale.error?.message ?? '', /newer status run/);
+            assert.equal(stale.calls.length, 0);
+            assert.equal(stale.outputs['dated-ready'], 'true');
+            for (const runNumber of ['10', '11']) {
+              const fresh = await run({publish: true, preview: false, runNumber, comments});
+              assert.ifError(fresh.error);
+              assert.deepEqual(fresh.calls.map(c => c.name), runNumber === '10' ? [] : ['update']);
+            }
+            for (const options of [{publish: false, preview: false}, {publish: true, preview: true}]) {
+              const preview = await run({...options, runNumber: '9', comments});
+              assert.ifError(preview.error); assert.equal(preview.calls.length, 0);
+            }
+            for (const value of ['', '0', '-1', '01', '1.5', '9007199254740992']) {
+              const malformed = await run({publish: true, preview: false, runNumber: value});
+              assert.match(malformed.error?.message ?? '', /invalid publication run number/);
+              assert.equal(malformed.calls.length, 0);
+            }
+            for (const replacement of ['', '<!-- tracker-ci-health-run:0 -->', '<!-- tracker-ci-health-run:01 -->']) {
+              const body = comments[0].body.replace('<!-- tracker-ci-health-run:10 -->', replacement);
+              const legacy = await run({publish: true, preview: false, comments: [owned(body)]});
+              assert.match(legacy.error?.message ?? '', /invalid owned status run/);
+              assert.equal(legacy.calls.length, 0);
+              assert.equal(legacy.outputs['dated-ready'], 'true');
+            }
+          });
+
+          test('dated upload survives publication failure but never admits invalid or partial reports', async () => {
+            assert.match(workflow, /name: Validate, render saved JSON, and update owned status\n        id: render/);
+            const upload = workflow.slice(workflow.lastIndexOf('      - uses: actions/upload-artifact'));
+            const guard = /if: \$\{\{ (.*) \}\}/.exec(upload)[1];
+            assert.equal(guard, "!cancelled() && steps.render.outputs.dated-ready == 'true'");
+            // Execute the status-function guard for both failed and successful steps;
+            // an explicit status function prevents Actions' implicit success() gate.
+            const admitted = new Function('cancelled', 'steps', `return ${guard.replace('outputs.dated-ready', "outputs['dated-ready']")}`);
+            for (const options of [{}, {summaryFailure: true}, {apiFailure: true},
+              {apiFailure: true, comments: [owned(marker + '\n## Rolling CI health: 2026-11-05\n\nold')]},
+              {fullPages: true}, {manifest: {source_revision: 'f'.repeat(40)}},
+              {writeFailure: '2026-11-05.json'}, {writeFailure: '2026-11-05.md'}]) {
+              const got = await run({...options, publish: true, preview: false});
+              const ready = !options.manifest && !options.writeFailure;
+              assert.equal(got.outputs['dated-ready'], ready ? 'true' : undefined);
+              assert.equal(Boolean(got.error), Object.keys(options).length > 0);
+              if (ready) {
+                assert.deepEqual(JSON.parse(got.files.get('2026-11-05.json')), report());
+                assert.match(got.files.get('2026-11-05.md'), /INCOMPLETE OBSERVATIONS/);
+              }
+              for (const cancelled of [false, true]) assert.equal(
+                admitted(() => cancelled, {render: {outputs: got.outputs}}), ready && !cancelled);
+            }
+            assert.match(upload, /if-no-files-found: error\n          retention-days: 35/);
+          });
+          test('wrong ref, missing/oversized report, wrong schema/targets/provenance/rates refuse writes', async () => {
+            const badSchema = report(); badSchema.schema = 'other';
+            const badTarget = report(); badTarget.targets.pop();
+            const badRate = report(); badRate.targets[0].populations.default_push.pass_rate = 1;
+            for (const options of [{ref: 'refs/heads/topic'}, {missing: 'report.json'}, {missing: 'provenance.json'}, {oversize: true},
+              {manifest: {source_revision: 'f'.repeat(40)}}, {manifest: {collector_revision: sha}}, {rev: ''}, {rev: 'main'}, {report: badSchema}, {report: badTarget}, {report: badRate}]) {
+              const got = await run({...options, publish: true, preview: false});
+              assert.ok(got.error, JSON.stringify(options)); assert.equal(got.calls.length, 0);
+              assert.match(got.summaries.join(), /REPORT REFUSED/);
+            }
+          });
+          test('window timestamps must be canonical before naming artifacts or publishing', async () => {
+            for (const field of ['since', 'until']) {
+              const original = report()[field];
+              for (const value of [original.slice(0, 10), original.slice(0, 10).replaceAll('-', '/'), original.replace('T', ' '),
+                original.replace('Z', '+00:00'), original.replace('.000Z', 'Z')]) {
+                const r = report(); r[field] = value;
+                // Slash dates parse as local midnight, not UTC. These fixtures
+                // need to be parseable but noncanonical, not the same instant.
+                assert.ok(Number.isFinite(Date.parse(value)), value);
+                const result = await run({report: r, publish: true, preview: false});
+                assert.match(result.error?.message ?? '', /invalid\/stale window/, `${field}: ${value}`);
+                assert.equal(result.files.size, 2);
+                assert.deepEqual(result.outputs, {});
+                assert.equal(result.calls.length, 0);
+              }
+            }
+            // Date.parse normalizes February 30 to March 2 instead of refusing it.
+            for (const field of ['since', 'until']) {
+              const r = report();
+              const normalized = Date.UTC(2026, 2, 2);
+              const end = field === 'until' ? normalized : normalized + 30 * 86400000;
+              r.since = iso(end - 30 * 86400000); r.until = iso(end);
+              const valid = await run({report: r, now: end + 3600000});
+              assert.ifError(valid.error);
+              assert.ok(valid.files.has(r.until.slice(0, 10) + '.md'));
+              r[field] = '2026-02-30T00:00:00.000Z';
+              const result = await run({report: r, now: end + 3600000, publish: true, preview: false});
+              assert.match(result.error?.message ?? '', /invalid\/stale window/);
+              assert.equal(result.files.size, 2);
+              assert.deepEqual(result.outputs, {});
+              assert.equal(result.calls.length, 0);
+            }
+          });
+
+          test('impossible run/attempt populations refuse before rendering or publication', async () => {
+            for (const population of ['default_push', 'pull_request']) {
+              for (const [runs, attempts, expected] of [[0, 1, 1], [2, 1, 2], [1, 1, 101], [501, 501, 501]]) {
+                const r = report(), populations = r.targets[0].populations;
+                Object.assign(populations[population], {runs, attempts, expected_attempts: expected,
+                  success: attempts, denominator: attempts, pass_rate: 1});
+                // Each population can fit separately while their shared listing exceeds its cap.
+                if (runs === 501) Object.assign(populations[population === 'default_push' ? 'pull_request' : 'default_push'],
+                  {runs: 500, attempts: 500, expected_attempts: 500, skipped: 500});
+                const got = await run({report: r, publish: true, preview: false});
+                assert.ok(got.error, `${population}: ${runs}/${attempts}/${expected}`);
+                assert.equal(got.calls.length, 0);
+                assert.equal(got.files.has('2026-11-05.md'), false);
+                assert.match(got.summaries.join(), /REPORT REFUSED/);
+              }
+            }
+          });
+          test('terminal attempts beyond first tries must fit the rerun budget', async () => {
+            for (const population of ['default_push', 'pull_request']) {
+              // Omitted first failures can falsely advertise 100% first-try success.
+              // Each tuple is runs, observed successes/failures, first successes/failures, expected attempts.
+              for (const [runs, success, failed, firstSuccess, firstFailed, expected, accepted] of [
+                [2, 1, 1, 1, 0, 2, false],
+                [2, 1, 1, 0, 1, 2, false],
+                [2, 2, 2, 1, 0, 4, false],
+                [2, 1, 1, 1, 1, 2, true],
+                [2, 2, 2, 1, 1, 4, true],
+                [1, 1, 0, 0, 0, 2, true], // Latest success; first attempt unavailable.
+                [1, 0, 1, 0, 0, 2, true], // Latest failure; first attempt unavailable.
+              ]) {
+                const r = report(), denominator = success + failed, first = firstSuccess + firstFailed;
+                Object.assign(r.targets[0].populations[population], {runs, attempts: denominator,
+                  expected_attempts: expected, success, failed, denominator, pass_rate: success / denominator,
+                  first_attempt_success: firstSuccess, first_attempt_failed: firstFailed,
+                  first_attempt_denominator: first, first_attempt_pass_rate: first ? firstSuccess / first : null});
+                const got = await run({report: r, publish: true, preview: false});
+                if (accepted) {
+                  assert.ifError(got.error);
+                  assert.deepEqual(got.calls.map(c => c.name), ['create']);
+                } else {
+                  assert.match(got.error?.message ?? '', /terminal attempts exceed rerun budget/);
+                  assert.equal(got.files.size, 2);
+                  assert.deepEqual(got.outputs, {});
+                  assert.equal(got.calls.length, 0);
+                }
+              }
+            }
+          });
+          test('listing and attempt caps accept their boundary with incomplete enrichment', async () => {
+            const r = report(), p = r.targets[0].populations;
+            for (const population of Object.values(p)) Object.assign(population,
+              {runs: 500, attempts: 500, expected_attempts: 50000, skipped: 500});
+            const got = await run({report: r, publish: true, preview: false});
+            assert.ifError(got.error); assert.deepEqual(got.calls.map(c => c.name), ['create']);
+            assert.match(got.files.get('2026-11-05.md'), /500\/50000/);
+          });
+          test('foreign/duplicate markers and capped comment history refuse publication', async () => {
+            const c = owned(marker + '\nold');
+            for (const options of [{comments: [{...c, user: {login: 'outsider', type: 'User'}}]}, {comments: [c, c]},
+              {comments: [{...c, issue_url: `https://api.github.com/repos/other/repo/issues/${issue}`}]}, {fullPages: true}]) {
+              const got = await run({...options, publish: true, preview: false}); assert.ok(got.error); assert.equal(got.calls.length, 0);
+            }
+          });
+          test('untrusted excerpts are escaped, recurrence retained, sample links constrained', async () => {
+            const r = observedReport(); r.groups = [group()];
+            const got = await run({report: r}); assert.ifError(got.error);
+            const md = got.files.get('2026-11-05.md');
+            assert.match(md, /recurring_without_issue/); assert.match(md, /&#60;script&#62;&#64;cgwalters/);
+            assert.doesNotMatch(md, /<script>|@cgwalters|\*\*x\*\*/);
+            r.groups[0].observation.samples[0].url = 'https://evil.example/';
+            assert.ok((await run({report: r})).error);
+          });
+          test('nonzero saved fixture separates populations, first try, reruns and excluded conclusions', async () => {
+            // Push: success; failure then success on rerun; cancellation.
+            // PR: first success; two first failures (one rerun success); skip,
+            // active, neutral; one expected attempt could not be read.
+            const fixture = JSON.parse(fs.readFileSync('.github/ci-health/test-report.json'));
+            const targets = fixture.targets.map(t => t.target);
+            const got = await run({report: fixture, targets}); assert.ifError(got.error);
+            const md = got.files.get('2026-11-05.md');
+            assert.match(md, /default_push \| INCOMPLETE attempts\/logs \| 3 \| 4\/4 \| 50\.0% \(1\/2\) \| 66\.7% \(2\/3\) \| 1\/0\/0\/0/);
+            assert.match(md, /pull_request \| INCOMPLETE attempts\/logs \| 6 \| 7\/8 \| 33\.3% \(1\/3\) \| 50\.0% \(2\/4\) \| 0\/1\/1\/1/);
+            assert.match(md, /INCOMPLETE OBSERVATIONS/); assert.match(md, /log unavailable; partial failure evidence/);
+            assert.match(md, /2 runs, 2 occurrences; first observed in window 2026-11-04T00:00:00Z; recurring_without_issue/);
+            assert.match(md, /run 123456789, attempt 1/); assert.match(md, /NOT eventual run-level/);
+            for (const mutate of [
+              r => { r.targets[0].populations.default_push.pass_rate = 0.5; },
+              r => { r.targets[0].populations.pull_request.first_attempt_pass_rate = 0.5; },
+              r => { r.targets[0].populations.default_push.success = 3; },
+              r => { r.targets[0].populations.pull_request.expected_attempts = 6; },
+              r => { r.targets[0].populations.default_push.first_attempt_success = 3; },
+            ]) {
+              const r = structuredClone(fixture); mutate(r);
+              const bad = await run({report: r, targets, publish: true, preview: false});
+              assert.ok(bad.error); assert.equal(bad.calls.length, 0);
+            }
+          });
+          test('large escaped and UTF-8 sections stay bounded without losing the full artifact', async () => {
+            for (const value of ['&'.repeat(1800), '界'.repeat(1800)]) {
+              const r = observedReport(), index = {};
+              r.targets[0].warnings = Array(12).fill(value);
+              r.groups = Array.from({length: 13}, (_, i) => {
+                const g = group();
+                g.observation.signature = hash(String(i));
+                g.observation.job = value;
+                return g;
+              });
+              for (let i = 0; i < 100; i++) index[hash('absent' + i)] = {...entry(8), owner: value};
+              for (const publish of [false, true]) {
+                const got = await run({report: r, index, publish, preview: false});
+                assert.ifError(got.error);
+                const body = got.summaries[0], full = got.files.get('2026-11-05.md');
+                assert.ok(Buffer.byteLength(body) < 60000);
+                assert.equal(got.calls.length, publish ? 1 : 0);
+                if (publish) assert.equal(got.calls[0].args.body, body);
+                assert.equal((full.match(/Signature /g) ?? []).length, 13);
+                assert.equal((full.match(/overdue absent signature/g) ?? []).length, 100);
+                assert.deepEqual(JSON.parse(got.files.get('2026-11-05.json')), r);
+                for (const [heading, total, pattern] of [
+                  ['Warnings', 4 * config.targets.length + 10, /^- \*\*WARNING:\*\*/gm],
+                  ['Findings and groups', 13, /^- ostreedev\/ostree/gm],
+                  ['Absent overdue entries', 100, /overdue absent signature/g],
+                ]) {
+                  const section = body.split('### ' + heading + '\n')[1].split('\n\n')[0];
+                  const shown = (section.match(pattern) ?? []).length;
+                  assert.ok(shown > 0 && shown < total);
+                  assert.match(section, new RegExp(`Presentation truncated: ${total - shown} more entries; see artifact`));
+                  assert.ok(Buffer.byteLength(section) <= 12000);
+                }
+                assert.match(body, /INCOMPLETE OBSERVATIONS/);
+                assert.match(body, /Aggregate attempt rates are NOT eventual/);
+              }
+            }
+          });
+          test('whole-entry truncation retains priority and discloses a first entry too large to fit', async () => {
+            for (const oversized of [false, true]) {
+              const r = observedReport();
+              r.groups = Array.from({length: 13}, (_, i) => {
+                const g = group(); g.observation.signature = hash(String(i));
+                // Put the only recurring finding last in input order.
+                if (i < 12) { g.observation.run_ids.pop(); g.findings = []; }
+                else if (oversized) {
+                  g.observation.job = '&'.repeat(2000);
+                  g.observation.test = '&'.repeat(2000);
+                }
+                return g;
+              });
+              const got = await run({report: r}); assert.ifError(got.error);
+              const section = got.summaries[0].split('### Findings and groups\n')[1].split('\n\n')[0];
+              assert.match(section, new RegExp(`Presentation truncated: ${oversized ? 13 : 1} more entries; see artifact`));
+              if (oversized) assert.doesNotMatch(section, /Signature |No observed groups/);
+              else {
+                assert.equal((section.match(/Signature /g) ?? []).length, 12);
+                assert.match(section.split('\n')[0], /recurring_without_issue/);
+              }
+              assert.equal((got.files.get('2026-11-05.md').match(/Signature /g) ?? []).length, 13);
+            }
+          });
+          test('bounded findings rank distinct affected runs within existing priority', async () => {
+            const specs = [
+              ['zz-overdue', 2, 2], ['zz-widespread', 20, 20],
+              ['tie-a', 3, 3], ['tie-b', 3, 300],
+              ...Array.from({length: 11}, (_, i) => [`filler-${String(i).padStart(2, '0')}`, 2, 2000]),
+              ['aa-single-run', 1, 10000],
+            ];
+            const expected = specs.map(([job]) => hash(job));
+            const index = {[expected[0]]: entry(8)};
+            for (const publish of [false, true]) for (const reverse of [false, true]) {
+              const r = report();
+              r.groups = specs.map(([job, runs, occurrences]) => {
+                const g = group();
+                Object.assign(g.observation, {signature: hash(job), job, occurrences,
+                  run_ids: Array.from({length: runs}, (_, i) => i + 1), samples: []});
+                if (runs === 1) g.findings = [];
+                if (index[g.observation.signature]) {
+                  g.classification = index[g.observation.signature]; g.class = 'flake';
+                  g.findings.push('flake_unexplained_over_seven_days');
+                }
+                return g;
+              });
+              if (reverse) r.groups.reverse();
+              const p = r.targets[0].populations.default_push;
+              Object.assign(p, {runs: 20, attempts: 20, expected_attempts: 20, failed: 20,
+                denominator: 20, pass_rate: 0, first_attempt_failed: 20,
+                first_attempt_denominator: 20, first_attempt_pass_rate: 0});
+              const got = await run({report: r, index, publish, preview: false});
+              assert.ifError(got.error);
+              const signatures = text => [...text.matchAll(/Signature ([a-f0-9]{64})\./g)].map(m => m[1]);
+              assert.deepEqual(signatures(got.files.get('2026-11-05.md')), expected);
+              assert.deepEqual(JSON.parse(got.files.get('2026-11-05.json')), r, 'raw observations are not reordered');
+              assert.equal(got.calls.length, publish ? 1 : 0);
+              for (const text of [got.summaries[0], ...(publish ? [got.calls[0].args.body] : [])]) {
+                assert.deepEqual(signatures(text), expected.slice(0, 12));
+                assert.match(text, /Presentation truncated: 4 more entries; see artifact/);
+              }
+            }
+          });
+          test('strict seven-day boundary; absent overdue signatures audited, never called recovered', async () => {
+            for (const [days, overdue] of [[7, false], [7 + 1 / 86400, true]]) {
+              const e = entry(days), r = observedReport(), g = group();
+              g.classification = e; g.class = 'flake';
+              if (overdue) g.findings.push('flake_unexplained_over_seven_days');
+              r.groups = [g];
+              const got = await run({report: r, index: {[signature]: e}}); assert.ifError(got.error);
+              assert.equal(got.files.get('2026-11-05.md').includes('flake_unexplained_over_seven_days'), overdue);
+              const absent = await run({index: {[signature]: e}}); assert.ifError(absent.error);
+              assert.equal(absent.files.get('2026-11-05.md').includes('Absence does NOT prove recovery'), overdue);
+            }
+          });
+          test('absent overdue flakes retain reviewed follow-up context on every surface', async () => {
+            for (const issue of [null, 'https://github.com/jmarrero-forge/tracker/issues/123', '<script>@owner [issue](bad)</script>']) {
+              const e = {...entry(8), issue, owner: '<owner>@team'};
+              for (const publish of [false, true]) {
+                const got = await run({index: {[signature]: e}, publish, preview: false});
+                assert.ifError(got.error);
+                assert.equal(got.calls.length, publish ? 1 : 0);
+                for (const text of [got.files.get('2026-11-05.md'), got.summaries[0], ...(publish ? [got.calls[0].args.body] : [])]) {
+                  assert.ok(text.includes(`first seen ${e.first_seen}`));
+                  assert.match(text, /owner &#60;owner&#62;&#64;team, fix staged/);
+                  assert.ok(text.includes(`issue ${issue === null ? 'none' : issue.startsWith('https:') ? issue : '&#60;script&#62;&#64;owner &#91;issue&#93;&#40;bad&#41;&#60;/script&#62;'}.`));
+                  assert.match(text, /Absence does NOT prove recovery/);
+                  assert.doesNotMatch(text, /<script>|@team|@owner/);
+                }
+                assert.deepEqual(JSON.parse(got.files.get('2026-11-05.json')), report());
+              }
+            }
+            for (const e of [{...entry(8), explained_at: iso(until)}, {...entry(8), class: 'infra'}]) {
+              const got = await run({index: {[signature]: e}});
+              assert.ifError(got.error);
+              assert.doesNotMatch(got.files.get('2026-11-05.md'), /overdue absent signature/);
+            }
+          });
+          test('without a named status issue, publication refuses and keeps the dated report', async () => {
+            for (const options of [{}, {publish: true}, {preview: false}]) {
+              const got = await run({...options, source: workflowSource});
+              assert.ifError(got.error); assert.equal(got.calls.length, 0);
+            }
+            const got = await run({source: workflowSource, publish: true, preview: false});
+            assert.match(got.error?.message ?? '', /no status issue named/);
+            assert.equal(got.calls.length, 0);
+            assert.equal(got.outputs['dated-ready'], 'true');
+            assert.match(got.summaries.join(), /REPORT REFUSED/);
+          });
 
   # actionlint, zizmor and the runner-label policy shared by the forge
   # repositories, at the versions its `just check` recipe pins on the

@@ -1,0 +1,9 @@
+{
+  "targets": [
+    {"repository": "ostreedev/ostree", "workflow": "tests.yml"},
+    {"repository": "ostreedev/ostree", "workflow": "rust.yml"},
+    {"repository": "ostreedev/ostree", "workflow": "bootc.yaml"},
+    {"repository": "coreos/rpm-ostree", "workflow": "ci.yaml"}
+  ],
+  "index": {}
+}

@@ -1,7 +1,7 @@
 ---
 verdict: bot-ok
-ai-trailer: default (Generated-by: AI); nothing written, and precedent on main is Assisted-by (28 of the last 100 commits)
-dco: no (no branch rules on main, and no DCO check on any of the 8 recent PR heads sampled)
+ai-trailer: default (Generated-by: AI); nothing written, and precedent on main is Assisted-by or Generated-by (36 of the last 100 commits, five authors)
+dco: no (no ruleset applies to main and its branch protection requires only the Jenkins pr-merge and Build checks; no DCO check on any of the 8 recent PR heads sampled)
 sources:
   - repo: coreos/rpm-ostree
     path: .gemini
@@ -30,7 +30,8 @@ sources:
   - repo: coreos/.github
     path: profile/README.md
     sha: 3022b18e4dee0a57b61261cbbc19f2a5b858af52
-checked: 2026-09-25 by the policy-check subagent (coordinator session 929c7a64, converted from an earlier read-only survey and re-read against current upstream)
+checked: 2026-11-24 by a coordinator subagent (sources, policy-named files, main's protection and rulesets, and checks on 8 recent PR heads re-read against GitHub)
+rebase: any
 ---
 
 No file mentions AI, LLMs, bots or disclosure trailers. CONTRIBUTING.md and
@@ -65,3 +66,23 @@ cgwalters' standing default for these repositories (jmarrero-forge/tracker#23):
 when he accepts a forge PR, it is posted upstream under the bot identity, and
 upstream rules on LLMs are an advisory warning unless they clearly disallow
 bot accounts.
+
+## Re-check and rebase (2026-11-24)
+
+Every source still has its recorded id, and no other policy-named file
+has appeared in the scanned directories of rpm-ostree or coreos/.github.
+The earlier "no branch rules" missed main's classic branch protection,
+whose required checks are Jenkins pr-merge and Build, neither of them a
+DCO check. Of the last 100 commits on main, 36 now carry Assisted-by
+or Generated-by and 11 a Signed-off-by, against the 28 and 14 the
+rationale quotes. `rebase: any` is how cgwalters-forge/tracker's records
+of the upstreams its harness maintains have it (his 10 November
+decision: a clean promotion rebase needs no further approval, a conflict
+holds; it keeps no rpm-ostree record), taken with jmarrero's 2026-11-24
+decision to maintain rpm-ostree that way.
+
+The top-level CONTRIBUTING.md is a symlink to docs/CONTRIBUTING.md, and
+GitHub's contents listing says so (`type: symlink`). The pinned
+agent-board (113f892, as upstream's main) holds a symlink source as
+stale, and a policy-named file left out of the record too, so this
+record cannot pass promotion's freshness check as it stands.

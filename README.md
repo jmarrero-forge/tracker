@@ -38,15 +38,22 @@ repositories until the variables below are set (tracker#42).
 | [poll](.github/workflows/poll.yml) | `agent-board pass` on [pass.json](.github/pass.json) every 10 minutes: pull request follow-up and board Status | Applies while the variable `PASS_APPLY` is `enabled`; otherwise each run's summary says what it would have done |
 | [promote](.github/workflows/promote.yml) | `agent-board promote`: an approved draft in a midstream fork goes upstream, with jmarrero's `Signed-off-by` | Off until the variable `PROMOTE` is `enabled` |
 | [review](.github/workflows/review.yml) | An agent's review of every pull request here, through `cgwalters-review.yml` | Off until the variable `AGENT_REVIEW` is set |
+| [ci-health](.github/workflows/ci-health.yml) | Daily at 06:43 UTC, `agent-board ci-health` over the upstreams' CI ([config.json](.github/ci-health/config.json)): a 30-day report of pass rates and failure groups, read-only (see [CI health](#ci-health)) | Report only: [publication.json](.github/ci-health/publication.json) is `publish: false` and no status issue is named |
 | [ci](.github/workflows/ci.yml) | `just test` (agent-board's installer, the config tests, `pass --check-config`, the poll's checks), actionlint and zizmor, that the bounds parse, and that scripts only shrink | On |
 
 The pass follows the bot's pull requests here and in
 jmarrero-forge/actions, and in the forge's forks with the `bot-midstream`
 topic (never merging there), and derives every board item's Status, with
 upstream's caps (`--max-dispatch 20 --max-writes 60
---max-status-changes 50`). It starts no board work yet: pass.json has
-`wip: 0`, `triage: false` and no `epics`, `pools`, `usage` or `holds`;
-each of those lanes is a pull request of its own. `--apply` is passed
+--max-status-changes 50`). It starts board work as upstream's does,
+within pass.json's `wip` and the `claude` pool; a lane left off
+(`sessions`, `mix`) is a pull request of its own. From 09:00 UTC each
+day it also plans the maintainer digest (`maintain`, agent-board's
+docs/pass.md, "Maintain"): one `research` run, reserving a fifth of the
+pool's allowance while it is due, that sorts the incoming pull requests
+of ostreedev/ostree and coreos/rpm-ostree into one comment on
+[tracker#117](https://github.com/jmarrero-forge/tracker/issues/117) and
+writes nothing upstream. `--apply` is passed
 only while the variable `PASS_APPLY` is `enabled`, whether the pass is
 scheduled or started by hand (upstream lets a manual `apply=true`
 through without it), so unsetting `PASS_APPLY` stops every write and
@@ -120,10 +127,27 @@ fork's main, merging upstream's agent-board there first. A resync
 copies the same files from upstream's main and applies that diff again.
 Upstream's auxiliary callers and their files are left out: the
 supervisor and sessions, the release train, the retro, soak, weekly
-blog, eval and comparison, CI health, the review corpus and refresh,
-maintain-shadow, midstream-sync, forge-sync, ruleset-check, the broker
-probe, the agent-board pin bump, review-send, the tailnet test, the
-misctool secondary bounds and the recorded-incident replay.
+blog, eval and comparison, the CI-health retention rehearsal, the review
+corpus and refresh, maintain-shadow, midstream-sync, forge-sync,
+ruleset-check, the broker probe, the agent-board pin bump,
+review-send, the tailnet test, the misctool secondary bounds and the
+recorded-incident replay.
+
+### CI health
+
+`ci-health.yml` is upstream's, retargeted: once a day it collects 30 days
+of the default-branch push and pull-request runs of ostreedev/ostree's
+`tests.yml`, `rust.yml` and `bootc.yaml` and coreos/rpm-ostree's `ci.yaml`
+with the job token, then renders the saved JSON into the run's summary
+and dated artifacts. It reads the upstreams' public Actions history only:
+it checks out none of their code and writes nothing there, and an empty
+or incomplete population is reported as such, never as passing. The
+collector is the pass's agent-board pin, so it moves with
+`AGENT_BOARD_REV`. Upstream also keeps a status comment on an issue;
+ours names no issue yet, so the renderer refuses to publish even if
+`publication.json` is turned on, until one is named in the workflow.
+ci.yml's test job runs upstream's offline tests of the renderer
+(`just test-ci-health`).
 
 ### Setup
 

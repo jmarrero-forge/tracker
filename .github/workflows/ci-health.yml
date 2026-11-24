@@ -1,0 +1,397 @@
+# Public read-only observations; no checkout of observed projects.
+# cgwalters-forge/tracker's, retargeted (README, "CI health"): our
+# repository, our upstreams' workflows in .github/ci-health/config.json, the
+# shared AGENT_BOARD_REV pin and no status issue yet, so publication.json
+# stays off.
+name: ci-health
+on:
+  schedule:
+    - cron: '43 6 * * *'
+  workflow_dispatch:
+    inputs:
+      preview:
+        description: Render artifacts without updating the status comment
+        type: boolean
+        default: true
+
+permissions: {}
+concurrency:
+  group: ci-health
+  cancel-in-progress: false
+# Ours: the one agent-board pin every workflow shares (just agent-board-pin),
+# rather than upstream's separate CI_HEALTH_REV: the installer accepts only
+# our fork's CI builds, whose artifacts expire, so the collector moves with
+# the pass. The report step checks the collector against this same pin.
+env:
+  AGENT_BOARD_REV: 113f892e9a4589c6a88e2740ef1a018f8c212f98
+
+jobs:
+  collect:
+    if: ${{ github.repository == 'jmarrero-forge/tracker' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    outputs:
+      raw-artifact-url: ${{ steps.raw.outputs.artifact-url }}
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # A GitHub release outage (504s for over an hour on 2026-11-08) must not
+      # stop the job: build the same just from crates.io instead.
+      - id: just
+        continue-on-error: true
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+        with:
+          just-version: 1.58.0
+      - if: steps.just.outcome == 'failure'
+        run: cargo install --locked --version 1.58.0 just && echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Install verified agent-board
+        timeout-minutes: 10
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: just build-agent-board "$AGENT_BOARD_REV"
+      - name: Collect once
+        timeout-minutes: 4
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: node {0}
+        run: |
+          const fs = require('node:fs');
+          const { execFileSync } = require('node:child_process');
+          const { createHash } = require('node:crypto');
+          const hash = b => createHash('sha256').update(b).digest('hex');
+          const config = fs.readFileSync('.github/ci-health/config.json');
+          const raw = execFileSync(process.env.RUNNER_TEMP + '/agent-board/bin/agent-board',
+            ['ci-health', '--config', '.github/ci-health/config.json', '--format', 'json'], { timeout: 180000, maxBuffer: 4 * 1024 * 1024 });
+          JSON.parse(raw);
+          const base = process.env.RUNNER_TEMP + '/ci-health';
+          fs.mkdirSync(base, { recursive: true });
+          fs.writeFileSync(base + '/report.json', raw);
+          fs.writeFileSync(base + '/provenance.json', JSON.stringify({repository: process.env.GITHUB_REPOSITORY,
+            ref: process.env.GITHUB_REF, source_revision: process.env.GITHUB_SHA, collector_revision: process.env.AGENT_BOARD_REV,
+            run_id: process.env.GITHUB_RUN_ID, run_attempt: process.env.GITHUB_RUN_ATTEMPT,
+            config_sha256: hash(config), report_sha256: hash(raw)}) + '\n');
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: raw
+        with:
+          name: ci-health-raw-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-health/*.json
+          if-no-files-found: error
+          retention-days: 35
+
+  report:
+    needs: collect
+    if: ${{ github.repository == 'jmarrero-forge/tracker' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+    steps:
+      # No checkout or artifact-supplied executable code in this token job.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ci-health-raw-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/ci-health
+      - name: Validate, render saved JSON, and update owned status
+        id: render
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          PREVIEW: ${{ github.event_name != 'schedule' && inputs.preview != false }}
+          RAW_ARTIFACT_URL: ${{ needs.collect.outputs.raw-artifact-url }}
+        with:
+          script: |
+            const fs = require('node:fs');
+            const crypto = require('node:crypto');
+            const assert = require('node:assert/strict');
+            // Ours: no status issue is named yet; publication refuses until one is.
+            const repo = 'jmarrero-forge/tracker', issue = null;
+            const marker = `<!-- tracker-ci-health:${issue}:v1 -->`;
+            const owner = 'github-actions[bot]';
+            const rev = process.env.AGENT_BOARD_REV;
+            const base = process.env.RUNNER_TEMP + '/ci-health/';
+            const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
+            const check = (yes, why) => assert.ok(yes, why);
+            const text = (value, max = 2000) => {
+              check(typeof value === 'string' && value.length <= max, 'invalid/oversized text');
+              return value;
+            };
+            // Logs, names and API warnings are data: suppress HTML, Markdown,
+            // mentions, controls and marker injection, not just angle brackets.
+            const escape = value => text(value).replace(/[&<>"'`*_\[\]()!#|@\\~\r\n\x00-\x1f\x7f]/g,
+              c => `&#${c.charCodeAt(0)};`);
+            const load = (name, limit) => {
+              const path = base + name, st = fs.lstatSync(path);
+              check(st.isFile() && st.size <= limit, 'missing/nonregular/oversized ' + name);
+              return fs.readFileSync(path);
+            };
+            try {
+              check(/^[0-9a-f]{40}$/.test(rev ?? ''), 'invalid collector pin');
+              check(context.repo.owner + '/' + context.repo.repo === repo, 'wrong repository');
+              check(context.ref === 'refs/heads/' + context.payload.repository.default_branch, 'wrong ref');
+              check(['schedule', 'workflow_dispatch'].includes(context.eventName), 'wrong event');
+              const getConfig = async path => {
+                const result = await github.rest.repos.getContent({...context.repo, path, ref: context.sha});
+                check(result.data.type === 'file' && result.data.encoding === 'base64', 'config unavailable');
+                const bytes = Buffer.from(result.data.content, 'base64');
+                check(bytes.length <= 1024 * 1024, 'config too large');
+                return bytes;
+              };
+              const configBytes = await getConfig('.github/ci-health/config.json');
+              const config = JSON.parse(configBytes);
+              const policy = JSON.parse(await getConfig('.github/ci-health/publication.json'));
+              check(Object.keys(policy).join() === 'publish' && typeof policy.publish === 'boolean', 'invalid policy');
+              check(config.targets.length > 0 && config.targets.length <= 20 && Object.keys(config.index).length <= 100, 'config bounds');
+              const raw = load('report.json', 4 * 1024 * 1024);
+              const provenance = JSON.parse(load('provenance.json', 4096));
+              check(provenance.repository === repo && provenance.ref === context.ref &&
+                provenance.source_revision === context.sha && provenance.collector_revision === rev &&
+                provenance.run_id === String(context.runId) && provenance.run_attempt === process.env.GITHUB_RUN_ATTEMPT &&
+                provenance.config_sha256 === hash(configBytes) && provenance.report_sha256 === hash(raw), 'provenance mismatch');
+              const r = JSON.parse(raw);
+              check(r.schema === 'agent-board/ci-health/v1' && typeof r.complete === 'boolean', 'wrong report schema');
+              const until = Date.parse(r.until), since = Date.parse(r.since);
+              // Date.parse accepts normalized invalid dates and alternate text.
+              // Require the collector's UTC form before using it in labels/paths.
+              check(Number.isFinite(until) && Number.isFinite(since) && until - since === 30 * 86400000 &&
+                r.until === new Date(until).toISOString() && r.since === new Date(since).toISOString() &&
+                until % 86400000 === 0 && until <= Date.now() && Date.now() - until < 2 * 86400000, 'invalid/stale window');
+              check(r.bounds.api_operations === 500 && r.bounds.collection_seconds === 120 &&
+                r.bounds.pages_per_listing === 10 && r.bounds.log_bytes === 1048576 &&
+                r.bounds.aggregate_decoded_bytes === 33554432 && Number.isSafeInteger(r.decoded_bytes) &&
+                r.decoded_bytes >= 0 && r.decoded_bytes <= 40 * 1024 * 1024, 'invalid collector bounds');
+              check(Array.isArray(r.targets) && r.targets.length === config.targets.length &&
+                Array.isArray(r.groups) && r.groups.length <= 500, 'invalid target/group counts');
+              const warningTargets = [], rows = [];
+              const integer = n => check(Number.isSafeInteger(n) && n >= 0, 'invalid nonnegative integer');
+              const positiveInteger = n => check(Number.isSafeInteger(n) && n > 0, 'invalid positive evidence integer');
+              const rate = (n, d) => d ? `${(100 * n / d).toFixed(1)}% (${n}/${d})` : 'no data (0/0)';
+              for (const [i, t] of r.targets.entries()) {
+                const warnings = [];
+                warningTargets.push(warnings);
+                assert.deepStrictEqual(t.target, config.targets[i], 'target mismatch');
+                check(typeof t.complete === 'boolean' && typeof t.listing_complete === 'boolean' &&
+                  Array.isArray(t.warnings) && t.warnings.length <= 2000, 'invalid coverage');
+                check(!t.complete || (t.listing_complete && t.warnings.length === 0), 'inconsistent completeness');
+                const label = t.target.repository + ' / ' + t.target.workflow;
+                // A partial 100% rate must not lose its coverage caveat when
+                // earlier targets exhaust the bounded warning preview.
+                const coverage = !t.listing_complete ? 'INCOMPLETE listing' :
+                  !t.complete ? 'INCOMPLETE attempts/logs' : 'Complete';
+                // Validate and escape each input before composing it: a valid
+                // 2,000-character warning plus its label exceeds one input's cap.
+                const warningLabel = escape(label);
+                for (const w of t.warnings) warnings.push(warningLabel + ': ' + escape(w));
+                if (!t.complete || !t.listing_complete) warnings.push(warningLabel + ': INCOMPLETE');
+                for (const pop of ['default_push', 'pull_request']) {
+                  const p = t.populations[pop];
+                  for (const k of ['runs', 'attempts', 'expected_attempts', 'success', 'failed', 'cancelled', 'skipped',
+                    'in_progress', 'other', 'first_attempt_success', 'first_attempt_failed', 'first_attempt_denominator', 'denominator']) integer(p[k]);
+                  // Impossible populations can advertise passing attempts with no
+                  // runs. The pinned collector observes the latest attempt at
+                  // listing time and accepts at most 100 attempts per run.
+                  check(p.runs <= p.attempts && p.expected_attempts <= 100 * p.runs, 'invalid run/attempt bounds');
+                  check(p.denominator === p.success + p.failed && p.first_attempt_denominator === p.first_attempt_success + p.first_attempt_failed &&
+                    p.attempts === p.denominator + p.cancelled + p.skipped + p.in_progress + p.other &&
+                    p.attempts <= p.expected_attempts && p.first_attempt_denominator <= p.runs &&
+                    p.first_attempt_success <= p.success && p.first_attempt_failed <= p.failed &&
+                    (!t.complete || p.attempts === p.expected_attempts), 'inconsistent counts');
+                  // Omitted first failures can inflate the first-try pass rate.
+                  // Every terminal observation not counted as a first try must
+                  // fit among the expected attempts beyond one per listed run.
+                  check(p.denominator - p.first_attempt_denominator <= p.expected_attempts - p.runs,
+                    'terminal attempts exceed rerun budget');
+                  for (const [field, n, d] of [['pass_rate', p.success, p.denominator],
+                    ['first_attempt_pass_rate', p.first_attempt_success, p.first_attempt_denominator]]) {
+                    check(d === 0 ? p[field] === null : typeof p[field] === 'number' && Math.abs(p[field] - n / d) < 1e-12, 'invalid rate');
+                  }
+                  if (p.runs === 0) warnings.push(warningLabel + ' / ' + pop + ': NO DATA');
+                  rows.push(`| ${escape(label)} | ${pop} | ${coverage} | ${p.runs} | ${p.attempts}/${p.expected_attempts} | ${rate(p.first_attempt_success, p.first_attempt_denominator)} | ${rate(p.success, p.denominator)} | ${p.cancelled}/${p.skipped}/${p.in_progress}/${p.other} | ${p.first_attempt_failed}/${p.failed} |`);
+                }
+                // Both populations share one listing: ten pages of 100 runs.
+                check(t.populations.default_push.runs + t.populations.pull_request.runs <= 1000, 'run listing exceeds bound');
+              }
+              check(r.complete === r.targets.every(t => t.complete), 'inconsistent report completeness');
+              const warnings = warningTargets.flat();
+              // One noisy target must not consume every warning preview slot.
+              // Round-robin in configured target order, diagnostics before each
+              // target's generic coverage notices. The full artifact keeps all.
+              const warningPreview = [];
+              for (let i = 0; warningPreview.length < 12; i++) {
+                const round = warningTargets.flatMap(w => i < w.length ? [w[i]] : []);
+                if (!round.length) break;
+                warningPreview.push(...round);
+              }
+              const seen = new Set(), groupLines = [];
+              for (const g of r.groups) {
+                const o = g.observation;
+                check(/^[a-f0-9]{64}$/.test(o.signature) && !seen.has(o.signature), 'invalid/duplicate signature');
+                seen.add(o.signature);
+                check(config.targets.some(t => t.repository === o.repository), 'group outside scope');
+                // Threat: invented recurrence can outrank real failures even
+                // when the population counts are valid. Groups span workflows,
+                // so use this repository's observed runs, not one listing's cap.
+                const repositoryRuns = r.targets.filter(t => t.target.repository === o.repository)
+                  .reduce((n, t) => n + t.populations.default_push.runs + t.populations.pull_request.runs, 0);
+                check(Array.isArray(o.run_ids) && o.run_ids.length > 0 && o.run_ids.length <= repositoryRuns &&
+                  new Set(o.run_ids).size === o.run_ids.length, 'invalid run IDs');
+                o.run_ids.forEach(positiveInteger); integer(o.occurrences);
+                // A normalized invalid date can place a failure inside the
+                // window. The collector preserves GitHub's created_at, which
+                // uses seconds; also accept the millisecond UTC report form.
+                const firstSeen = Date.parse(o.first_seen);
+                check(o.occurrences >= o.run_ids.length && firstSeen >= since && firstSeen < until &&
+                  [new Date(firstSeen).toISOString(), new Date(firstSeen).toISOString().replace('.000Z', 'Z')]
+                    .includes(o.first_seen), 'invalid observation');
+                assert.deepStrictEqual(g.classification, config.index[o.signature] ?? null, 'unreviewed classification');
+                check(g.class === (config.index[o.signature]?.class ?? 'unknown'), 'unreviewed class');
+                check(Array.isArray(o.samples) && o.samples.length <= 3, 'invalid samples');
+                for (const s of o.samples) {
+                  // Zero IDs/attempts create impossible evidence links; attempts
+                  // beyond 100 cannot come from the pinned bounded collector.
+                  positiveInteger(s.run_id); positiveInteger(s.attempt); positiveInteger(s.job_id);
+                  check(s.attempt <= 100, 'evidence attempt exceeds collector bound');
+                  check(o.run_ids.includes(s.run_id) && s.url === `https://github.com/${o.repository}/actions/runs/${s.run_id}`, 'unsafe evidence URL');
+                }
+                const entry = config.index[o.signature];
+                const findings = [];
+                if (o.run_ids.length >= 2 && !entry?.issue) findings.push('recurring_without_issue');
+                if (entry?.class === 'flake' && !entry.explained_at && until - Date.parse(entry.first_seen) > 7 * 86400000) findings.push('flake_unexplained_over_seven_days');
+                check(JSON.stringify(findings) === JSON.stringify(g.findings), 'invalid findings');
+                const mapping = entry ? ` Owner ${escape(entry.owner)}; fix ${escape(entry.fix_status)}; issue ${entry.issue ? escape(entry.issue) : 'none'}.` : ' No reviewed mapping.';
+                groupLines.push({priority: findings.length, runs: o.run_ids.length, line: `- ${escape(o.repository)} / ${escape(o.job)} / ${escape(o.test)}: ${escape(g.class)}; ${o.run_ids.length} runs, ${o.occurrences} occurrences; first observed in window ${o.first_seen}; ${findings.join(', ') || 'no finding'}.${mapping} Signature ${o.signature}. Error: ${escape(text(o.first_error, 1000))}. ` +
+                  o.samples.map(s => `[run ${s.run_id}, attempt ${s.attempt}](${s.url}/attempts/${s.attempt}) [job ${s.job_id}](${s.url}/job/${s.job_id})`).join(' ')});
+              }
+              const absent = Object.entries(config.index).filter(([sig, e]) => !seen.has(sig) && e.class === 'flake' &&
+                !e.explained_at && until - Date.parse(e.first_seen) > 7 * 86400000)
+                .map(([sig, e]) => `- ${sig}: overdue absent signature; first seen ${escape(e.first_seen)}; owner ${escape(e.owner)}, fix ${escape(e.fix_status)}; issue ${e.issue ? escape(e.issue) : 'none'}. Absence does NOT prove recovery.`);
+              const runURL = `https://github.com/${repo}/actions/runs/${context.runId}`;
+              const artifactURL = process.env.RAW_ARTIFACT_URL;
+              check(typeof artifactURL === 'string' && artifactURL.startsWith(runURL + '/artifacts/') &&
+                /^[0-9]+$/.test(artifactURL.slice((runURL + '/artifacts/').length)), 'unsafe artifact URL');
+              // Alphabetical ordering alone can hide widespread recurrence past
+              // the status limit. Within finding priority, rank distinct runs,
+              // not occurrences inflated by reruns or matrix jobs. Keep all
+              // groups in the dated artifact and the existing text tie-break.
+              groupLines.sort((a, b) => b.priority - a.priority || b.runs - a.runs || a.line.localeCompare(b.line));
+              const lines = groupLines.map(g => g.line);
+              // Count the validated groups before presentation limits hide work.
+              // Categories overlap; absent index entries are not observations.
+              const findingCount = finding => r.groups.filter(g => g.findings.includes(finding)).length;
+              const totals = `**Finding totals (before presentation limits):** ${r.groups.length} observed groups; ` +
+                `${r.groups.filter(g => g.class === 'unknown').length} unclassified; ` +
+                `${findingCount('recurring_without_issue')} recurring without an issue; ` +
+                `${findingCount('flake_unexplained_over_seven_days')} observed overdue unexplained flakes; ` +
+                `${absent.length} absent overdue unexplained index entries.\n` +
+                'Counts are signature groups, not runs; categories overlap. Zero findings do not establish healthy CI.\n\n';
+              // Count all validated targets, not the bounded warning preview.
+              // These three coverage states partition the configured scope;
+              // empty populations are independent of target completeness.
+              const targetCount = r.targets.length;
+              const emptyPopulations = pop => r.targets.filter(t => t.populations[pop].runs === 0).length;
+              const coverageTotals = '**Coverage totals (configured scope only):** ' +
+                `${r.targets.filter(t => t.complete).length}/${targetCount} targets complete; ` +
+                `${r.targets.filter(t => !t.listing_complete).length} with incomplete listings; ` +
+                `${r.targets.filter(t => t.listing_complete && !t.complete).length} with complete listings but incomplete attempts/logs. ` +
+                `Populations with no observed runs: default_push ${emptyPopulations('default_push')}/${targetCount}; ` +
+                `pull_request ${emptyPopulations('pull_request')}/${targetCount}.\n` +
+                'No observed runs can mean unavailable history, not inactivity or passing CI.\n\n';
+              // A delayed rerun retains its workflow run number, even when it
+              // collects on the same day as a newer run with newer source/config.
+              const runNumber = process.env.GITHUB_RUN_NUMBER;
+              check(/^[1-9][0-9]*$/.test(runNumber ?? '') && Number.isSafeInteger(Number(runNumber)),
+                'invalid publication run number');
+              const header = `${marker}\n## Rolling CI health: ${r.until.slice(0, 10)}\n\n` +
+                `<!-- tracker-ci-health-run:${runNumber} -->\n\n` +
+                `**${r.complete ? 'Collector complete for configured targets only' : 'WARNING: INCOMPLETE OBSERVATIONS'}; not a healthy-CI verdict.**\n\n` +
+                `**Scope incomplete:** fixed ${config.targets.length}-target baseline; additional workflows need an explicit scope decision. See [coverage](https://github.com/${repo}/blob/${context.sha}/README.md#ci-health).\n\n` +
+                `[Run and dated JSON/Markdown](${runURL}#artifacts) · [Source JSON artifact](${artifactURL}) · source/config ${context.sha} · collector ${rev}\n\n` +
+                `Window [${r.since}, ${r.until}); attempts observed at collection time, not a historical snapshot.\n\n` + coverageTotals + totals;
+              const warningText = warnings.length ? warnings.map(w => '- **WARNING:** ' + w).join('\n') : 'No collector warnings.';
+              const table = '\n\n| Target | Population | Target coverage | Runs | Observed/expected attempts | First-attempt pass rate | Observed attempt pass rate | Cancel/skip/active/other | Failed attempts (first/all observed) |\n|---|---|---|---:|---:|---|---|---|---|\n' + rows.join('\n') +
+                '\n\nFailed attempts include failures without a signature; first attempts are a subset of all observed attempts, not an additional count.';
+              const footer = '\n\nAggregate attempt rates are NOT eventual run-level rates. Empty populations are not passes. Unknowns remain unknown; staged is not deployed. No issues, retries, quarantine, repair dispatch or upstream writes.\n';
+              const full = header + warningText + table + '\n\n### Failure groups\n' + (lines.join('\n') || 'No observed groups; this is not evidence of recovery.') +
+                '\n\n### Overdue index entries absent from this report\n' + (absent.join('\n') || 'None (index mappings may still be pending).') + footer;
+              check(Buffer.byteLength(full) <= 4 * 1024 * 1024, 'rendered report too large');
+              fs.writeFileSync(base + r.until.slice(0, 10) + '.json', raw);
+              fs.writeFileSync(base + r.until.slice(0, 10) + '.md', full);
+              core.setOutput('dated-ready', 'true');
+              // Valid log text can expand after escaping or UTF-8 encoding and
+              // otherwise prevent any status update. Bound each detail section
+              // in bytes, keeping whole entries and disclosing every omission.
+              // The full dated artifact above retains all entries.
+              const section = (entries, limit, empty, total = entries.length) => {
+                const byteLimit = 12000, noticeReserve = 100;
+                let result = '', count = 0;
+                for (const line of entries.slice(0, limit)) {
+                  const next = result + (count ? '\n' : '') + line;
+                  if (Buffer.byteLength(next) > byteLimit - noticeReserve) break;
+                  result = next; count++;
+                }
+                return result + (count < total ?
+                  `\n**Presentation truncated: ${total - count} more entries; see artifact.**` : (result ? '' : empty));
+              };
+              const body = header + '### Warnings\n' + section(warningPreview.map(w => '- **WARNING:** ' + w), 12, 'No collector warnings.', warnings.length) + table +
+                '\n\n### Findings and groups\n' + section(lines, 12, 'No observed groups; this is not evidence of recovery.') +
+                '\n\n### Absent overdue entries\n' + section(absent, 100, 'None; mappings pending.') + footer;
+              check(Buffer.byteLength(body) < 60000, 'comment too large');
+              await core.summary.addRaw(body).write();
+              // Threat: unapproved coverage or a manual rehearsal overwriting
+              // the daily status. One local policy, off by default; preview
+              // cannot override it. No repository variable or secret changes.
+              if (!policy.publish || process.env.PREVIEW !== 'false') {
+                core.info('Preview only; status comment unchanged.');
+                return;
+              }
+              check(Number.isSafeInteger(issue) && issue > 0, 'no status issue named');
+              const target = await github.rest.issues.get({...context.repo, issue_number: issue});
+              check(target.data.number === issue && !target.data.pull_request && target.data.repository_url === `https://api.github.com/repos/${repo}`, 'wrong issue');
+              const matches = [];
+              // Bounded listing: refuse ambiguity/truncation rather than append.
+              for (let page = 1; page <= 10; page++) {
+                const {data} = await github.rest.issues.listComments({...context.repo, issue_number: issue, per_page: 100, page});
+                for (const c of data) if ((c.body ?? '').includes(marker)) {
+                  check(c.user.login === owner && c.user.type === 'Bot' && c.body.startsWith(marker + '\n') &&
+                    c.issue_url === `https://api.github.com/repos/${repo}/issues/${issue}`, 'foreign marker ownership');
+                  matches.push(c);
+                }
+                if (data.length < 100) break;
+                check(page < 10, 'comment history truncated');
+              }
+              check(matches.length <= 1, 'duplicate owned marker');
+              if (matches.length) {
+                // Threat: yesterday's delayed rerun can still pass freshness
+                // validation and overwrite today's status despite serialization.
+                // Reuse the owned header; unknown state requires manual repair.
+                const date = /^## Rolling CI health: (\d{4}-\d{2}-\d{2})\n\n/.exec(matches[0].body.slice(marker.length + 1))?.[1];
+                const previous = Date.parse(date + 'T00:00:00.000Z');
+                check(Number.isFinite(previous) && new Date(previous).toISOString().slice(0, 10) === date,
+                  'invalid owned status window');
+                check(previous <= until, 'refusing to replace newer status window');
+                // Window ordering alone allows an older run to roll back the
+                // same day's status. Reuse the bounded owned-comment read.
+                const previousRun = /^<!-- tracker-ci-health-run:([1-9][0-9]*) -->$/m.exec(matches[0].body)?.[1];
+                check(previousRun !== undefined && Number.isSafeInteger(Number(previousRun)), 'invalid owned status run');
+                check(Number(previousRun) <= Number(runNumber), 'refusing to replace newer status run');
+                if (matches[0].body !== body) await github.rest.issues.updateComment({...context.repo, comment_id: matches[0].id, body});
+              } else await github.rest.issues.createComment({...context.repo, issue_number: issue, body});
+            } catch (error) {
+              await core.summary.addRaw('**CI HEALTH REPORT REFUSED / MISSING: no status published.** See failed validation step.').write();
+              throw error;
+            }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        # A failed summary or status write must not discard validated reports.
+        # Never upload a partial pair or reports refused before validation.
+        if: ${{ !cancelled() && steps.render.outputs.dated-ready == 'true' }}
+        with:
+          name: ci-health-dated-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/ci-health/2*.json
+            ${{ runner.temp }}/ci-health/2*.md
+          if-no-files-found: error
+          retention-days: 35

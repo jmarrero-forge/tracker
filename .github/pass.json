@@ -35,6 +35,7 @@
   "readFreeHolds": true,
   "triage": true, "sweep": {"weekday": "Monday", "hourUtc": 13}, "overlap": {"staleDraftHours": 4}, "triageFollowUpDays": 1, "assignHolds": true, "notifications": true, "fixPlans": true, "authored": 3, "reserveScheduling": true, "operatorAsk": {"text":"For our own infrastructure, ask the operator only about big-picture architecture, plus posture: upstream posting, midstream promotion, credentials, broker policy, rulesets and bypasses, spending caps, security disclosure, and changes to which repositories agents may target (target bounds). For everything else, take the recommended option and record why. Mechanical follow-through (rebasing, re-running CI, fixing conflicts or refreshing a stale branch) is work, not a decision: plan it as an implement job; a rebase keeps existing Signed-off-by trailers and adds none. Only a real decision goes to the operator.","domains":["architecture","upstream","promotion","credentials","broker","ruleset","budget","security","bounds"],"harness":{"repositories":["jmarrero-forge/tracker","jmarrero-forge/actions","jmarrero-forge/agenthome","jmarrero-forge/homegit","jmarrero-forge/.github","jmarrero/atomic-setup"],"excludedLabels":["operator-action","decision","question","review-draft"],"foreignTargetLabelPrefix":"target:","replanText":"The board pass asks a triage run to plan this issue again: it is our own infrastructure, not an operator decision."}}, "midstream": {"owner": "jmarrero-forge", "topic": "bot-midstream"}, "triageClose": true, "replanInvalid": true, "replanAfterDays": 7, "idleReplan": true, "researchPlans": true,
   "revisit": {"perPass": 1, "afterDays": 14, "heldAfterDays": 7, "repairQuestions": true},
+  "maintain": {"repos": {"sinceDays": 90, "min": 5, "max": 2, "include": ["ostreedev/ostree", "coreos/rpm-ostree"]}, "share": 0.2, "digest": {"repository": "jmarrero-forge/tracker", "issue": 117}, "hourUtc": 9},
   "planPools": ["claude"],
   "triagePools": ["claude"],
   "pools": {"claude": {"target": 0.95, "burst": 50}},
@@ -47,6 +48,7 @@
         "jmarrero-forge/composefs-rs",
         "jmarrero-forge/bcvk",
         "jmarrero-forge/rpm-ostree",
+        "jmarrero-forge/ostree",
         "jmarrero-forge/image-builder",
         "jmarrero-forge/osbuild"
       ]}},
