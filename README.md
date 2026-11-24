@@ -38,6 +38,7 @@ repositories until the variables below are set (tracker#42).
 | [poll](.github/workflows/poll.yml) | `agent-board pass` on [pass.json](.github/pass.json) every 10 minutes: pull request follow-up and board Status | Applies while the variable `PASS_APPLY` is `enabled`; otherwise each run's summary says what it would have done |
 | [promote](.github/workflows/promote.yml) | `agent-board promote`: an approved draft in a midstream fork goes upstream, with jmarrero's `Signed-off-by` | Off until the variable `PROMOTE` is `enabled` |
 | [review](.github/workflows/review.yml) | An agent's review of every pull request here, through `cgwalters-review.yml` | Off until the variable `AGENT_REVIEW` is set |
+| [ci-health](.github/workflows/ci-health.yml) | Daily at 06:43 UTC, `agent-board ci-health` over the upstreams' CI ([config.json](.github/ci-health/config.json)): a 30-day report of pass rates and failure groups, read-only (see [CI health](#ci-health)) | Report only: [publication.json](.github/ci-health/publication.json) is `publish: false` and no status issue is named |
 | [ci](.github/workflows/ci.yml) | `just test` (agent-board's installer, the config tests, `pass --check-config`, the poll's checks), actionlint and zizmor, that the bounds parse, and that scripts only shrink | On |
 
 The pass follows the bot's pull requests here and in
@@ -126,10 +127,27 @@ fork's main, merging upstream's agent-board there first. A resync
 copies the same files from upstream's main and applies that diff again.
 Upstream's auxiliary callers and their files are left out: the
 supervisor and sessions, the release train, the retro, soak, weekly
-blog, eval and comparison, CI health, the review corpus and refresh,
-maintain-shadow, midstream-sync, forge-sync, ruleset-check, the broker
-probe, the agent-board pin bump, review-send, the tailnet test, the
-misctool secondary bounds and the recorded-incident replay.
+blog, eval and comparison, the CI-health retention rehearsal, the review
+corpus and refresh, maintain-shadow, midstream-sync, forge-sync,
+ruleset-check, the broker probe, the agent-board pin bump,
+review-send, the tailnet test, the misctool secondary bounds and the
+recorded-incident replay.
+
+### CI health
+
+`ci-health.yml` is upstream's, retargeted: once a day it collects 30 days
+of the default-branch push and pull-request runs of ostreedev/ostree's
+`tests.yml`, `rust.yml` and `bootc.yaml` and coreos/rpm-ostree's `ci.yaml`
+with the job token, then renders the saved JSON into the run's summary
+and dated artifacts. It reads the upstreams' public Actions history only:
+it checks out none of their code and writes nothing there, and an empty
+or incomplete population is reported as such, never as passing. The
+collector is the pass's agent-board pin, so it moves with
+`AGENT_BOARD_REV`. Upstream also keeps a status comment on an issue;
+ours names no issue yet, so the renderer refuses to publish even if
+`publication.json` is turned on, until one is named in the workflow.
+ci.yml's test job runs upstream's offline tests of the renderer
+(`just test-ci-health`).
 
 ### Setup
 

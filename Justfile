@@ -5,7 +5,7 @@
 set positional-arguments
 
 # Repository and workflow checks run by CI.
-test: test-runner-profiles test-agent-board-install test-config test-pass-config test-poll-bounds test-poll-next test-pass-state agent-board-pin test-agent-board-bump
+test: test-runner-profiles test-agent-board-install test-config test-pass-config test-poll-bounds test-poll-next test-pass-state test-ci-health agent-board-pin test-agent-board-bump
 
 # Execute the workflow's actual resolver, without credentials or forge traffic.
 test-runner-profiles:
@@ -296,6 +296,13 @@ test-pass-state:
     }
     const tests = fs.readFileSync('.github/workflows/ci.yml', 'utf8').split('      - name: Test pass state export\n')[1];
     new Function('require', tests.split('        run: |\n')[1].split('      - run: just test\n')[0].replace(/^          /gm, ''))(require);
+
+# ci.yml's offline tests of ci-health.yml's collector and renderer, which
+# its test job also runs as a step of their own.
+test-ci-health:
+    #!/usr/bin/env node
+    const step = require('node:fs').readFileSync('.github/workflows/ci.yml', 'utf8').split('      - name: Test CI-health saved reports and publication\n')[1];
+    new Function('require', /^        run: \|\n((?: {10}.*\n|\n)+)/m.exec(step)[1].replace(/^          /gm, ''))(require);
 
 # Public cache and durable status handoff. Never print bodies or API diagnostics.
 pass-state mode:
