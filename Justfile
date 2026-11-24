@@ -294,6 +294,36 @@ test-pass-state:
     for (const id of ['42', '0', '-1', '../41', '41;exit', '1'.repeat(21)]) {
       assert.deepEqual(predecessor({}, {}, { PREVIOUS_RUN_ID: id }), { id: '', calls: [] });
     }
+    // Cursors survive the handoff only for a verified public repository.
+    const visibility = endpoint => {
+      const repo = endpoint.slice('repos/'.length);
+      if (repo === 'owner/down') throw new Error('API outage');
+      if (repo === 'owner/vague') return { full_name: repo };
+      return repo === 'owner/private' ? { full_name: repo, private: true, visibility: 'private' } :
+        { full_name: repo === 'owner/renamed' ? 'other/name' : repo, private: false, visibility: 'public' };
+    };
+    // Shapes the pinned pass loads: a repository, a thread (scan), or either (share).
+    const repoKeys = ['follow_cursor', 'action_first_cursor', 'authored_cursor'];
+    const keepers = { 'Owner/Public': [...repoKeys, 'share_cursor'], 'owner/public#12': ['share_cursor', 'scan_cursor'] };
+    for (const cursor of ['Owner/Public', 'owner/public#12', 'owner/private#12', 'owner/private', 'owner/vague#1',
+      'owner/renamed', 'owner/down#3', 'owner/public#0', 'owner/public#', 'owner/public/x', 'owner/public\n',
+      'my_org/public', 'owner', ' owner/public', 42, null, { repo: 'owner/public' }]) {
+      for (const key of [...repoKeys, 'share_cursor', 'scan_cursor']) {
+        const { state } = publicStates({ [key]: cursor, holds: { [cursor]: 'private hold' }, intake_waiting: {},
+          maintain: {}, action_first_positions: { [cursor]: 1 } }, null, visibility);
+        assert.deepEqual(state, { schema: 'agent-board/poll-state/v1', interval_seconds: 300, responses: {}, pass_responses: {},
+          ...(keepers[cursor]?.includes(key) && { [key]: cursor }) }, `${key} ${JSON.stringify(cursor)}`);
+      }
+    }
+    const mixed = publicStates({ share_cursor: 'owner/public#1', scan_cursor: 'owner/down#2', authored_cursor: 'owner/private' },
+      null, visibility).state;
+    assert.equal(mixed.share_cursor, 'owner/public#1', 'one failed lookup keeps other public cursors');
+    assert.ok(!('scan_cursor' in mixed) && !('authored_cursor' in mixed));
+    // Cursors only use repository slots the caches leave; at the cap they are dropped, not fatal.
+    const full = Object.fromEntries(Array.from({ length: 100 }, (_, i) => [`https://api.github.com/repos/owner/r${i}/issues`, {}]));
+    const capped = publicStates({ responses: full, follow_cursor: 'owner/public' }, null, visibility).state;
+    assert.equal(Object.keys(capped.responses).length, 100);
+    assert.ok(!('follow_cursor' in capped));
     const tests = fs.readFileSync('.github/workflows/ci.yml', 'utf8').split('      - name: Test pass state export\n')[1];
     new Function('require', tests.split('        run: |\n')[1].split('      - run: just test\n')[0].replace(/^          /gm, ''))(require);
 
@@ -363,14 +393,33 @@ pass-state mode:
       const repository = url => /^https:\/\/api\.github\.com\/repos\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/(?:issues(?:\/[1-9][0-9]*(?:\/(?:comments|labels))?|\/comments\/[1-9][0-9]*)?|pulls(?:\/[1-9][0-9]*)?|labels)(?:\?[^#\s]*)?$(?![\s\S])/
         .exec(url)?.[1].toLowerCase();
       const caches = ['responses', 'pass_responses'];
+      // Without its read cursors the next pass restarts every walk at the first
+      // repository. A cursor can name a private repository or thread, so export
+      // it unchanged only when its repository is verified public. Each key keeps
+      // the one shape the pinned pass loads; it refuses the whole state otherwise.
+      const cursors = { follow_cursor: '', action_first_cursor: '', authored_cursor: '',
+        share_cursor: '(?:#[1-9][0-9]*)?', scan_cursor: '#[1-9][0-9]*' };
+      const cursorRepository = key => typeof state[key] === 'string' &&
+        new RegExp(`^([A-Za-z0-9-]+/[A-Za-z0-9_.-]+)${cursors[key]}$(?![\\s\\S])`).exec(state[key])?.[1].toLowerCase();
       const repositories = new Set([...caches.flatMap(key => Object.keys(state[key] || {}).map(repository).filter(Boolean)),
         ...Object.keys(living?.entries || {}).map(issueRepository)]);
       if (repositories.size > MAX_REPOSITORIES) throw new Error('too many repositories');
+      // Cursors are checked last, within the remaining cap and deadline, so they never fail the export.
+      const required = repositories.size;
+      for (const key of Object.keys(cursors)) {
+        const repo = cursorRepository(key);
+        if (repo && repositories.size < MAX_REPOSITORIES) repositories.add(repo);
+      }
       const publicRepos = new Set();
       const ledgerRepos = new Set(Object.keys(living?.entries || {}).map(issueRepository));
       const deadline = Date.now() + 90000;
+      let checked = 0;
       for (const repo of repositories) {
-        if (Date.now() >= deadline) throw new Error('metadata deadline');
+        if (Date.now() >= deadline) {
+          if (checked < required) throw new Error('metadata deadline');
+          break;
+        }
+        checked++;
         try {
           const metadata = get(`repos/${repo}`, Math.min(10000, deadline - Date.now()));
           if (metadata.full_name?.toLowerCase() === repo && metadata.private === false && metadata.visibility === 'public') {
@@ -379,10 +428,11 @@ pass-state mode:
               metadata.private === true && ['private', 'internal'].includes(metadata.visibility))) throw new Error('unverified ledger repository');
         } catch { if (ledgerRepos.has(repo)) throw new Error('cannot verify ledger visibility'); }
       }
-      // Cursors/intake/maintenance metadata can also name private repositories.
-      // Publish only the response-cache envelope, not arbitrary state fields.
+      // Holds, intake and maintenance metadata can also name private repositories.
+      // Publish only the response-cache envelope and public cursors, not arbitrary state fields.
       const exported = { schema: 'agent-board/poll-state/v1',
         interval_seconds: Number.isSafeInteger(state.interval_seconds) ? state.interval_seconds : 300 };
+      for (const key of Object.keys(cursors)) if (publicRepos.has(cursorRepository(key))) exported[key] = state[key];
       for (const key of caches) {
         // Drop entries whole: changing a body would invalidate its cached ETag.
         exported[key] = Object.fromEntries(Object.entries(state[key] || {}).filter(([url]) => publicRepos.has(repository(url))));
